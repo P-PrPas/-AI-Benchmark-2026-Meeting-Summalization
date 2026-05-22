@@ -1,0 +1,5 @@
+pandas
+rouge-score
+pythainlp
+transformers
+sentence-transformers

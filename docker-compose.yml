@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────
+# docker-compose.yml  — LOCAL TESTING ONLY
+# สำหรับทดสอบ local ก่อน push ขึ้น registry จริง
+#
+# วิธีใช้:
+#   docker compose build
+#   docker compose up
+# ─────────────────────────────────────────────────────────────
+
+services:
+  camnet:
+    image: "camnet-p"
+    build: .
+    platform: "linux/amd64"
+
+    volumes:
+      # model weights (shared, same level as CAMNET_P)
+      - /project/zz991000-zdeva/zz991011/models:/model/weights:ro
+
+      # test data → read-only (server จะ mount test_set จริงมาแทน)
+      - /project/zz991000-zdeva/zz991011/CAMNET_P/data/test:/model/test:ro
+
+      # output dir → read-write
+      - /project/zz991000-zdeva/zz991011/CAMNET_P/output:/result:rw
+
+      # progress lib → read-only (server mount benchmark_lib มาให้)
+      - /project/zz991000-zdeva/zz991011/CAMNET_P/benchmark_lib:/benchmark_lib:ro
+
+    working_dir: /model
+
+    # ── GPU support (uncomment ถ้า server มี GPU) ──────────────
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
