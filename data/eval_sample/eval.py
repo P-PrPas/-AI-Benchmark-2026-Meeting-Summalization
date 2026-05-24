@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -9,7 +10,7 @@ from pythainlp.tokenize import word_tokenize
 from rouge_score import rouge_scorer
 from rouge_score.tokenizers import Tokenizer
 
-BASE_DIR = "/project/zz991000-zdeva/zz991011"
+BASE_DIR = Path(__file__).resolve().parents[2]
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def tokenize_thai(text):
@@ -72,7 +73,7 @@ def run_evaluation(sol: pd.DataFrame, pred: pd.DataFrame, merge='ID'):
 
 
     # calculate SS-score
-    model = SentenceTransformer(os.path.join(BASE_DIR, "models", "bge-m3"))
+    model = SentenceTransformer(str(BASE_DIR / "weight" / "bge-m3"))
     texts = df[f'abstractive_sol'].tolist() + df[f'abstractive_pred'].tolist()
     
     embeddings = model.encode(texts,batch_size=32,
@@ -106,8 +107,8 @@ def calculate_final_score(metrics_dict):
     return wss*ss + wrl*rl + wj*j
 
 if __name__ == "__main__":
-    sol = load_csv(os.path.join(BASE_DIR, "data", "eval_sample", "submission.csv"))
-    pred = load_csv(os.path.join(BASE_DIR, "data", "eval_sample", "submission.csv"))
+    sol = load_csv(BASE_DIR / "data" / "eval_sample" / "submission.csv")
+    pred = load_csv(BASE_DIR / "data" / "eval_sample" / "submission.csv")
     
     matrix = run_evaluation(sol, pred)
     matrix['score'] = calculate_final_score(matrix)

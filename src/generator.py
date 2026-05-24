@@ -1,5 +1,6 @@
 import os
 from typing import List, Dict, Optional
+from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import sys
@@ -58,15 +59,28 @@ class Generator:
             return
 
         print(f"Loading generator model from {model_path}...")
+        model_path = Path(model_path)
+        if not model_path.exists():
+            available = []
+            if model_path.parent.exists():
+                available = sorted(
+                    path.name for path in model_path.parent.iterdir() if path.is_dir()
+                )
+            raise FileNotFoundError(
+                f"LLM model path not found: {model_path}. "
+                f"Available model directories: {available}"
+            )
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True
+            str(model_path),
+            trust_remote_code=True,
+            local_files_only=True,
         )
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
+            str(model_path),
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto" if torch.cuda.is_available() else None,
-            trust_remote_code=True
+            trust_remote_code=True,
+            local_files_only=True,
         )
         print("Generator model loaded successfully")
 

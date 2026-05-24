@@ -18,7 +18,11 @@ class Embedder:
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Loading BGE-M3 model from {model_path}...")
-        self.model = SentenceTransformer(model_path, device=self.device)
+        self.model = SentenceTransformer(
+            str(model_path),
+            device=self.device,
+            local_files_only=True,
+        )
         print(f"Model loaded on {self.device}")
 
     def encode(self, texts: List[str], batch_size: int = 32, normalize: bool = True) -> np.ndarray:

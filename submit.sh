@@ -18,6 +18,7 @@ REGISTRY="registry.ai.in.th"
 IMAGE_PATH="2026-textsum/b35d39c9/peerapas.2eii"
 LOCAL_NAME="camnet-p"
 USERNAME="peerapas.2eii"
+SUBMIT_MODEL_NAME="${CAMNET_SUBMIT_MODEL_NAME:-Qwen2.5-7B-Instruct}"
 
 # ── รับ USER_TAG จาก argument ────────────────────────────────
 if [ -z "$1" ]; then
@@ -30,6 +31,7 @@ FULL_IMAGE="${REGISTRY}/${IMAGE_PATH}:${USER_TAG}"
 echo "========================================"
 echo "  CAMNET-P Submission Script"
 echo "  Image : ${FULL_IMAGE}"
+echo "  Model : ${SUBMIT_MODEL_NAME}"
 echo "========================================"
 
 # ── Step 1: Login ────────────────────────────────────────────
@@ -40,7 +42,13 @@ docker login ${REGISTRY} -u ${USERNAME}
 # ── Step 2: Build ────────────────────────────────────────────
 echo ""
 echo "▶ Step 2/4 — Build Docker image ..."
-docker build -t ${LOCAL_NAME} .
+if [ ! -d "weight/${SUBMIT_MODEL_NAME}" ]; then
+  echo "❌  Missing model directory: weight/${SUBMIT_MODEL_NAME}"
+  exit 1
+fi
+docker build \
+  --build-arg CAMNET_LLM_MODEL_NAME=${SUBMIT_MODEL_NAME} \
+  -t ${LOCAL_NAME} .
 
 # ── Step 3: Tag ──────────────────────────────────────────────
 echo ""

@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!.dockerignore
+!requirements.txt
+!run.py
+!src/
+!src/**
+!weight/
+!weight/**

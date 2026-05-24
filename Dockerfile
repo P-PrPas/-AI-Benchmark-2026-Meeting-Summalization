@@ -1,32 +1,44 @@
-# ─────────────────────────────────────────────────────────────
-# CAMNET-P  Thai Parliamentary Summarization  — Model Submission
-# ─────────────────────────────────────────────────────────────
+ARG BASE_IMAGE=nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+FROM ${BASE_IMAGE}
+ARG CAMNET_LLM_MODEL_NAME=Qwen2.5-7B-Instruct
 
-# FROM python:3.11-slim
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    CAMNET_MODEL_DIR=/model/weights \
+    CAMNET_BGE_MODEL_PATH=/model/weights/bge-m3 \
+    CAMNET_LLM_MODEL_NAME=${CAMNET_LLM_MODEL_NAME} \
+    CAMNET_TEST_PATH=/model/test/test_set.json \
+    CAMNET_OUTPUT_DIR=/result \
+    CAMNET_PROGRESS_LIB=/benchmark_lib/progress \
+    CAMNET_STARTUP_SLEEP_SECONDS=10
 
-# ── Option B: GPU (uncomment + comment Option A if GPU server) ─
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
-RUN apt-get update && apt-get install -y python3 python3-pip \
-    && ln -s /usr/bin/python3 /usr/bin/python \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        build-essential; \
+    ln -sf /usr/bin/python3 /usr/bin/python; \
+    python3 -m pip install --upgrade pip; \
+    rm -rf /var/lib/apt/lists/*
 
-# ── System deps ────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# ── Python deps ────────────────────────────────────────────────
 COPY requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir --force-reinstall \
+        torch==2.6.0
 
-# ── Application code ───────────────────────────────────────────
-COPY run.py      /model/run.py
-COPY src/        /model/src/
+RUN mkdir -p /model/weights /model/test /result
+COPY weight/ /model/weights/
+RUN test -d /model/weights/bge-m3
+RUN test -d "/model/weights/${CAMNET_LLM_MODEL_NAME}"
 
-# NOTE: model weights ไม่ได้ COPY เข้า image
-# จะถูก mount เข้ามาที่ /model/weights/ ตอน run
-# ดูใน docker-compose.yml หัวข้อ volumes
+COPY run.py /model/run.py
+COPY src/ /model/src/
 
-# ── Working directory & entry point ────────────────────────────
 WORKDIR /model
 CMD ["python3", "run.py"]

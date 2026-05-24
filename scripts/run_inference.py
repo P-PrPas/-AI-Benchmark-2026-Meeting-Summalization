@@ -123,7 +123,7 @@ def main():
     print("\n[1/4] Loading embedder...")
     embedder = Embedder()
 
-    print("\n[2/4] Loading generator (Qwen3.6-27B-unsloth)...")
+    print(f"\n[2/4] Loading generator ({config.LLM_MODEL_PATH.name})...")
     generator = Generator()
     generator.load_model()
 

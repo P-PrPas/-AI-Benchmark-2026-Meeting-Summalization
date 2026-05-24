@@ -95,7 +95,7 @@ def run_evaluation(sol_path: str, pred_path: str) -> dict:
 
     # SS-score
     print("Computing SS-score with BGE-M3...")
-    model = SentenceTransformer(config.BGE_MODEL_PATH, device="cuda" if torch.cuda.is_available() else "cpu")
+    model = SentenceTransformer(str(config.BGE_MODEL_PATH), device="cuda" if torch.cuda.is_available() else "cpu")
     texts = df['abstractive_sol'].tolist() + df['abstractive_pred'].tolist()
 
     embeddings = model.encode(

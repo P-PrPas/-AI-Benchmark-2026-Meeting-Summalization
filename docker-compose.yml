@@ -1,34 +1,28 @@
-# ─────────────────────────────────────────────────────────────
-# docker-compose.yml  — LOCAL TESTING ONLY
-# สำหรับทดสอบ local ก่อน push ขึ้น registry จริง
-#
-# วิธีใช้:
-#   docker compose build
-#   docker compose up
-# ─────────────────────────────────────────────────────────────
-
 services:
   camnet:
-    image: "camnet-p"
-    build: .
-    platform: "linux/amd64"
-
+    image: camnet-p
+    build:
+      context: .
+      args:
+        BASE_IMAGE: nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+        CAMNET_LLM_MODEL_NAME: ${CAMNET_LLM_MODEL_NAME:-typhoon2-1b}
+    platform: linux/amd64
+    gpus: all
+    environment:
+      CAMNET_MODEL_DIR: /model/weights
+      CAMNET_LLM_MODEL_NAME: ${CAMNET_LLM_MODEL_NAME:-typhoon2-1b}
+      CAMNET_STARTUP_SLEEP_SECONDS: ${CAMNET_STARTUP_SLEEP_SECONDS:-10}
+      CAMNET_TEST_PATH: /model/test/test_set.json
+      CAMNET_OUTPUT_DIR: /result
+      CAMNET_PROGRESS_LIB: /benchmark_lib/progress
     volumes:
-      # model weights (shared, same level as CAMNET_P)
-      - /project/zz991000-zdeva/zz991011/models:/model/weights:ro
-
-      # test data → read-only (server จะ mount test_set จริงมาแทน)
-      - /project/zz991000-zdeva/zz991011/CAMNET_P/data/test:/model/test:ro
-
-      # output dir → read-write
-      - /project/zz991000-zdeva/zz991011/CAMNET_P/output:/result:rw
-
-      # progress lib → read-only (server mount benchmark_lib มาให้)
-      - /project/zz991000-zdeva/zz991011/CAMNET_P/benchmark_lib:/benchmark_lib:ro
-
+      - ./weight:/model/weights:ro
+      - ./data/test:/model/test:ro
+      - ./output:/result:rw
+      - ./benchmark_lib:/benchmark_lib:ro
     working_dir: /model
 
-    # ── GPU support (uncomment ถ้า server มี GPU) ──────────────
+    # GPU support (uncomment if the host has NVIDIA runtime)
     # deploy:
     #   resources:
     #     reservations:
