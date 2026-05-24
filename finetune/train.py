@@ -4,6 +4,7 @@ import argparse
 import gc
 import inspect
 import json
+import sys
 from pathlib import Path
 
 from .common import (
@@ -27,6 +28,12 @@ from .common import (
     save_json,
     set_global_seed,
 )
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 
 class JsonlLoggingCallback:

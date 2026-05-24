@@ -16,6 +16,8 @@ MODEL_ROOT="/project/zz991000-zdeva/zz991011/models"
 CACHE_ROOT="/project/zz991000-zdeva/zz991011/.cache"
 OUTPUT_DIR="$REPO_ROOT/artifacts/typhoon25_qwen3_4b_rag_qa_qlora"
 CONDA_ENV_NAME="three_env"
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-3}"
+NUM_LOGGING_STEPS="${NUM_LOGGING_STEPS:-10}"
 
 mkdir -p "$REPO_ROOT/logs" "$OUTPUT_DIR"
 cd "$REPO_ROOT"
@@ -34,13 +36,15 @@ echo "Job starts at: $(date)"
 echo "Running on node: $(hostname)"
 echo "Repo root: $REPO_ROOT"
 
-conda run -n "$CONDA_ENV_NAME" python -m finetune.train \
+conda run -n "$CONDA_ENV_NAME" python -u -m finetune.train \
   --project-root "$REPO_ROOT" \
   --train-json-path "$REPO_ROOT/data/train/train_set.json" \
   --model-name-or-path "$MODEL_ROOT/typhoon2.5-qwen3-4b" \
   --embed-model-name-or-path "$MODEL_ROOT/bge-m3" \
   --output-dir "$OUTPUT_DIR" \
   --cache-dir "$CACHE_ROOT" \
+  --num-train-epochs "$NUM_TRAIN_EPOCHS" \
+  --logging-steps "$NUM_LOGGING_STEPS" \
   "$@"
 
 echo "Job finished at: $(date)"

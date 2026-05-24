@@ -24,6 +24,10 @@ from src.prompting import NO_ANSWER_TEXT, NO_CONTEXT_TEXT, SYSTEM_PROMPT as SHAR
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 # ──────────────────────────────────────────────
 # Paths are configurable via src.config and Docker env vars.

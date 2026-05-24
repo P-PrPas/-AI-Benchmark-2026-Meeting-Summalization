@@ -35,7 +35,7 @@ echo "Job starts at: $(date)"
 echo "Running on node: $(hostname)"
 echo "Evaluate Model"
 
-conda run -n "$CONDA_ENV_NAME" python -m finetune.evaluate \
+conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate \
   --project-root "$REPO_ROOT" \
   --train-json-path "$REPO_ROOT/data/train/train_set.json" \
   --model-name-or-path "$EVAL_MODEL_PATH" \

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from src.prompting import NO_ANSWER_TEXT, NO_CONTEXT_TEXT, sanitize_generated_answer
 
@@ -30,6 +31,12 @@ from .common import (
     select_top_refs,
     retrieve_paragraphs,
 )
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
