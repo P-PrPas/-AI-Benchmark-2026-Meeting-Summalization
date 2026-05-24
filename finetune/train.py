@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 from pathlib import Path
 
 from .common import (
@@ -208,32 +209,44 @@ def main() -> None:
     model.print_trainable_parameters()
 
     bf16 = torch.cuda.is_bf16_supported()
-    training_args = TrainingArguments(
-        output_dir=str(args.output_dir / "checkpoints"),
-        per_device_train_batch_size=args.train_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        num_train_epochs=args.num_train_epochs,
-        warmup_ratio=args.warmup_ratio,
-        weight_decay=args.weight_decay,
-        logging_steps=args.logging_steps,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=args.save_total_limit,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        gradient_checkpointing=True,
-        lr_scheduler_type="cosine",
-        bf16=bf16,
-        fp16=not bf16,
-        report_to="none",
-        remove_unused_columns=False,
-        optim="paged_adamw_8bit",
-        seed=args.seed,
-        dataloader_pin_memory=True,
-    )
+    training_args_kwargs = {
+        "output_dir": str(args.output_dir / "checkpoints"),
+        "per_device_train_batch_size": args.train_batch_size,
+        "per_device_eval_batch_size": args.eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "num_train_epochs": args.num_train_epochs,
+        "warmup_ratio": args.warmup_ratio,
+        "weight_decay": args.weight_decay,
+        "logging_steps": args.logging_steps,
+        "save_strategy": "epoch",
+        "save_total_limit": args.save_total_limit,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+        "gradient_checkpointing": True,
+        "lr_scheduler_type": "cosine",
+        "bf16": bf16,
+        "fp16": not bf16,
+        "report_to": "none",
+        "remove_unused_columns": False,
+        "optim": "paged_adamw_8bit",
+        "seed": args.seed,
+        "dataloader_pin_memory": True,
+    }
+
+    training_args_signature = inspect.signature(TrainingArguments.__init__)
+    if "evaluation_strategy" in training_args_signature.parameters:
+        training_args_kwargs["evaluation_strategy"] = "epoch"
+    elif "eval_strategy" in training_args_signature.parameters:
+        training_args_kwargs["eval_strategy"] = "epoch"
+    else:
+        raise RuntimeError(
+            "This transformers build does not expose evaluation_strategy or eval_strategy "
+            "on TrainingArguments."
+        )
+
+    training_args = TrainingArguments(**training_args_kwargs)
 
     trainer = Trainer(
         model=model,
