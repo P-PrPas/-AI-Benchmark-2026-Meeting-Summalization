@@ -20,6 +20,7 @@ import pandas as pd
 from tqdm import tqdm
 from typing import List, Dict, Optional
 from src import config
+from src.prompting import NO_ANSWER_TEXT, NO_CONTEXT_TEXT, SYSTEM_PROMPT as SHARED_SYSTEM_PROMPT, build_user_prompt, sanitize_generated_answer
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -231,6 +232,8 @@ USER_TEMPLATE = (
     FEW_SHOT
     + "เอกสาร:\n{context}\n\nคำถาม: {query}\nตอบ: "
 )
+SYSTEM_PROMPT = SHARED_SYSTEM_PROMPT
+USER_TEMPLATE = None
 
 
 def load_generator():
@@ -268,13 +271,20 @@ def load_generator():
         return None, None
 
 
+def fallback_generate(query: str, paragraphs: List[Dict]) -> str:
+    if not paragraphs:
+        return NO_ANSWER_TEXT
+    best = next((p.get("text", "").strip() for p in paragraphs if p.get("text", "").strip()), "")
+    return sanitize_generated_answer(best or NO_ANSWER_TEXT)
+
+
 def generate(tokenizer, model, query: str, paragraphs: List[Dict]) -> str:
     if tokenizer is None or model is None:
         return fallback_generate(query, paragraphs)
     import torch
 
     context = "\n".join(f"[{p['para_id']}] {p['text']}" for p in paragraphs)
-    prompt  = USER_TEMPLATE.format(context=context, query=query)
+    prompt = build_user_prompt(context or NO_CONTEXT_TEXT, query)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -302,7 +312,7 @@ def generate(tokenizer, model, query: str, paragraphs: List[Dict]) -> str:
         outputs[0][inputs.input_ids.shape[1]:],
         skip_special_tokens=True,
     )
-    return response.strip()
+    return sanitize_generated_answer(response)
 
 
 # ──────────────────────────────────────────────

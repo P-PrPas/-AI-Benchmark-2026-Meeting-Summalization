@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from src.prompting import NO_CONTEXT_TEXT, SYSTEM_PROMPT, build_user_prompt
+
 
 LANTA_PROJECT_ROOT = Path("/project/zz991000-zdeva/zz991011/CAMNET_P")
 LANTA_MODEL_ROOT = Path("/project/zz991000-zdeva/zz991011/models")
@@ -17,15 +19,6 @@ DEFAULT_OUTPUT_DIR = LANTA_PROJECT_ROOT / "artifacts" / DEFAULT_ARTIFACT_NAME
 DEFAULT_TRAIN_JSON_PATH = LANTA_PROJECT_ROOT / "data" / "train" / "train_set.json"
 DEFAULT_BASE_MODEL_PATH = LANTA_MODEL_ROOT / "typhoon2.5-qwen3-4b"
 DEFAULT_EMBED_MODEL_PATH = LANTA_MODEL_ROOT / "bge-m3"
-
-SYSTEM_PROMPT = (
-    "คุณเป็นผู้ช่วยตอบคำถามจากบันทึกการประชุมรัฐสภาไทย\n"
-    "กฎ:\n"
-    "- ตอบจากข้อมูลในเอกสารที่ให้มาเท่านั้น\n"
-    "- ใช้ภาษาไทย\n"
-    '- ไม่ต้องขึ้นต้นด้วยคำว่า "ตอบ:" หรือ "คำตอบ:"\n'
-    '- หากข้อมูลไม่เพียงพอ ให้ตอบว่า "ไม่พบข้อมูลในเอกสาร"'
-)
 
 
 def set_global_seed(seed: int) -> None:
@@ -120,11 +113,9 @@ def load_json(path: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def build_user_prompt(context: str, query: str) -> str:
-    return f"เอกสาร:\n{context}\n\nคำถาม: {query}"
-
-
-def load_training_data(train_json_path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+def load_training_data(
+    train_json_path: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, dict[str, Any]]]:
     payload = load_json(train_json_path)
     docs = payload.get("docs") or []
     queries = payload.get("queries") or []
@@ -188,7 +179,7 @@ def build_raw_samples(
                 "doc_id": query["doc_id"],
                 "query": query["query"].strip(),
                 "answer": query["abstractive"].strip(),
-                "context": "\n".join(context_lines) if context_lines else "(ไม่มีข้อมูลอ้างอิง)",
+                "context": "\n".join(context_lines) if context_lines else NO_CONTEXT_TEXT,
                 "gold_refs": list(query.get("refs", [])),
             }
         )
@@ -333,11 +324,7 @@ def calculate_iou(pred_refs: Any, gold_refs: Any) -> float:
 
 
 def calculate_final_score(metrics: dict[str, float]) -> float:
-    return (
-        0.45 * metrics["SS-score"]
-        + 0.35 * metrics["rougeL"]
-        + 0.20 * metrics["IoU"]
-    )
+    return 0.45 * metrics["SS-score"] + 0.35 * metrics["rougeL"] + 0.20 * metrics["IoU"]
 
 
 def tokenize_thai(text: str) -> str:
@@ -390,7 +377,7 @@ def run_evaluation(sol_df: Any, pred_df: Any, semantic_model: Any):
     midpoint = len(texts) // 2
     ref_embeddings = embeddings[:midpoint]
     pred_embeddings = embeddings[midpoint:]
-    merged["SS-score"] = np.sum(ref_embeddings * pred_embeddings, axis=1)
+    merged["SS-score"] = (ref_embeddings * pred_embeddings).sum(axis=1)
 
     metrics = merged[["rougeL", "SS-score", "IoU"]].mean().to_dict()
     metrics["score"] = calculate_final_score(metrics)

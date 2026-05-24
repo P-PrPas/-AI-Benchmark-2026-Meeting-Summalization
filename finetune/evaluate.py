@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 
+from src.prompting import NO_ANSWER_TEXT, NO_CONTEXT_TEXT, sanitize_generated_answer
+
 from .common import (
     DEFAULT_ARTIFACT_NAME,
     DEFAULT_BASE_MODEL_PATH,
@@ -173,7 +175,7 @@ def main() -> None:
     def generate_answer(query: str, paragraphs: list[dict[str, str]]) -> str:
         context = "\n".join(f"[{paragraph['para_id']}] {paragraph['text']}" for paragraph in paragraphs)
         if not context.strip():
-            context = "(ไม่มีข้อมูลอ้างอิง)"
+            context = NO_CONTEXT_TEXT
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_prompt(context, query)},
@@ -201,7 +203,7 @@ def main() -> None:
         )
         generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
         answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        return answer or "ไม่พบข้อมูลในเอกสาร"
+        return sanitize_generated_answer(answer) or NO_ANSWER_TEXT
 
     prediction_rows = []
     gold_rows = []
