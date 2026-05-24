@@ -15,6 +15,7 @@ REPO_ROOT="/project/zz991000-zdeva/zz991011/CAMNET_P"
 MODEL_ROOT="/project/zz991000-zdeva/zz991011/models"
 CACHE_ROOT="/project/zz991000-zdeva/zz991011/.cache"
 OUTPUT_DIR="$REPO_ROOT/artifacts/typhoon25_qwen3_4b_rag_qa_qlora"
+EVAL_MODEL_PATH="$OUTPUT_DIR/final_merged"
 CONDA_ENV_NAME="three_env"
 
 mkdir -p "$REPO_ROOT/logs" "$OUTPUT_DIR"
@@ -37,8 +38,7 @@ echo "Evaluate Model"
 conda run -n "$CONDA_ENV_NAME" python -m finetune.evaluate \
   --project-root "$REPO_ROOT" \
   --train-json-path "$REPO_ROOT/data/train/train_set.json" \
-  --model-name-or-path "$MODEL_ROOT/typhoon2.5-qwen3-4b" \
-  --adapter-path "$OUTPUT_DIR/final_adapter" \
+  --model-name-or-path "$EVAL_MODEL_PATH" \
   --embed-model-name-or-path "$MODEL_ROOT/bge-m3" \
   --output-dir "$OUTPUT_DIR" \
   --cache-dir "$CACHE_ROOT" \

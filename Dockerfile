@@ -1,6 +1,6 @@
 ARG BASE_IMAGE=nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 FROM ${BASE_IMAGE}
-ARG CAMNET_LLM_MODEL_NAME=Qwen2.5-7B-Instruct
+ARG CAMNET_LLM_MODEL_NAME=final_merged
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

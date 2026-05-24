@@ -67,9 +67,15 @@ def _resolve_llm_model_path(model_dir: Path) -> Path:
     if model_name:
         return model_dir / model_name
 
-    preferred = model_dir / "Qwen2.5-7B-Instruct"
-    if preferred.exists():
-        return preferred
+    preferred_names = [
+        "final_merged",
+        "typhoon25_qwen3_4b_rag_qa_qlora",
+        "Qwen2.5-7B-Instruct",
+    ]
+    for preferred_name in preferred_names:
+        preferred = model_dir / preferred_name
+        if preferred.exists():
+            return preferred
 
     candidates = sorted(
         path for path in model_dir.iterdir()
@@ -78,7 +84,7 @@ def _resolve_llm_model_path(model_dir: Path) -> Path:
     if len(candidates) == 1:
         return candidates[0]
 
-    return preferred
+    return model_dir / preferred_names[0]
 
 
 BASE_DIR = PROJECT_ROOT

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import inspect
+import json
 from pathlib import Path
 
 from .common import (
@@ -27,6 +29,24 @@ from .common import (
 )
 
 
+class JsonlLoggingCallback:
+    """Persist Trainer log events to disk while training is running."""
+
+    def __init__(self, output_path: Path) -> None:
+        self.output_path = output_path
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text("", encoding="utf-8")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        payload = dict(logs)
+        payload.setdefault("step", state.global_step)
+        payload.setdefault("epoch", state.epoch)
+        with self.output_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fine-tune typhoon2.5-qwen3-4b for Thai RAG QA")
     parser.add_argument("--project-root", default=str(LANTA_PROJECT_ROOT))
@@ -47,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-total-limit", type=int, default=2)
+    parser.add_argument("--skip-merge", action="store_true")
+    parser.add_argument(
+        "--merge-dtype",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        default="auto",
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -99,6 +125,57 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
     print(f"  artifact_name={DEFAULT_ARTIFACT_NAME}")
+    print(f"  skip_merge={args.skip_merge}")
+    print(f"  merge_dtype={args.merge_dtype}")
+
+
+def resolve_merge_dtype(torch_module, merge_dtype: str):
+    if merge_dtype == "float16":
+        return torch_module.float16
+    if merge_dtype == "bfloat16":
+        return torch_module.bfloat16
+    if merge_dtype == "float32":
+        return torch_module.float32
+    if torch_module.cuda.is_available():
+        return torch_module.bfloat16 if torch_module.cuda.is_bf16_supported() else torch_module.float16
+    return torch_module.float32
+
+
+def merge_and_save_model(
+    *,
+    model_source: str,
+    adapter_dir: Path,
+    merged_dir: Path,
+    tokenizer,
+    cache_dir,
+    torch_module,
+    merge_dtype,
+) -> None:
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM
+
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    dtype = resolve_merge_dtype(torch_module, merge_dtype)
+    print(f"Loading base model for merge from {model_source}")
+    print(f"Merging adapter from {adapter_dir} into full model at dtype={dtype}")
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_source,
+        torch_dtype=dtype,
+        device_map="auto" if torch_module.cuda.is_available() else None,
+        trust_remote_code=True,
+        cache_dir=cache_dir_as_str(cache_dir),
+        low_cpu_mem_usage=True,
+    )
+    merged_model = PeftModel.from_pretrained(base_model, str(adapter_dir))
+    merged_model = merged_model.merge_and_unload()
+    merged_model.save_pretrained(
+        merged_dir,
+        safe_serialization=True,
+        max_shard_size="5GB",
+    )
+    tokenizer.save_pretrained(merged_dir)
+    print(f"Saved merged model to {merged_dir}")
 
 
 def main() -> None:
@@ -254,19 +331,42 @@ def main() -> None:
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=SupervisedDataCollator(tokenizer),
+        callbacks=[JsonlLoggingCallback(args.output_dir / "trainer_logs.jsonl")],
     )
 
     train_result = trainer.train()
     trainer.save_state()
     save_json(args.output_dir / "train_metrics.json", train_result.metrics)
+    save_json(args.output_dir / "trainer_log_history.json", {"rows": trainer.state.log_history})
 
     final_adapter_dir = args.output_dir / "final_adapter"
     final_adapter_dir.mkdir(parents=True, exist_ok=True)
     trainer.model.save_pretrained(final_adapter_dir)
     tokenizer.save_pretrained(final_adapter_dir)
-
     print(f"Saved adapter to {final_adapter_dir}")
+
+    final_merged_dir = args.output_dir / "final_merged"
+    if args.skip_merge:
+        print("Skipping merged-model export because --skip-merge was provided")
+    else:
+        del trainer
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        merge_and_save_model(
+            model_source=model_source,
+            adapter_dir=final_adapter_dir,
+            merged_dir=final_merged_dir,
+            tokenizer=tokenizer,
+            cache_dir=args.cache_dir,
+            torch_module=torch,
+            merge_dtype=args.merge_dtype,
+        )
+
     print(f"Saved split metadata to {args.output_dir / 'split_metadata.json'}")
+    print(f"Saved train metrics to {args.output_dir / 'train_metrics.json'}")
+    print(f"Saved trainer logs to {args.output_dir / 'trainer_logs.jsonl'}")
 
 
 if __name__ == "__main__":

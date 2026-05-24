@@ -6,6 +6,7 @@ from .common import (
     DEFAULT_ARTIFACT_NAME,
     DEFAULT_BASE_MODEL_PATH,
     DEFAULT_EMBED_MODEL_PATH,
+    DEFAULT_OUTPUT_DIR,
     LANTA_CACHE_ROOT,
     LANTA_PROJECT_ROOT,
     SYSTEM_PROMPT,
@@ -33,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate finetuned typhoon2.5-qwen3-4b on held-out validation")
     parser.add_argument("--project-root", default=str(LANTA_PROJECT_ROOT))
     parser.add_argument("--train-json-path")
-    parser.add_argument("--model-name-or-path", default=str(DEFAULT_BASE_MODEL_PATH))
+    parser.add_argument("--model-name-or-path", default=str(DEFAULT_OUTPUT_DIR / "final_merged"))
     parser.add_argument("--adapter-path")
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
     parser.add_argument("--output-dir")
@@ -58,18 +59,20 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         project_root=project_root,
     )
     args.cache_dir = resolve_path(args.cache_dir, project_root=project_root)
-    args.adapter_path = resolve_path(
-        args.adapter_path or (args.output_dir / "final_adapter"),
-        project_root=project_root,
+    args.adapter_path = (
+        resolve_path(args.adapter_path, project_root=project_root)
+        if args.adapter_path
+        else None
     )
     return args
 
 
 def validate_args(args: argparse.Namespace) -> None:
     ensure_path_exists(args.train_json_path, "Train JSON")
-    ensure_path_exists(args.adapter_path, "Adapter directory")
     ensure_path_exists(args.output_dir / "split_metadata.json", "Split metadata")
-    ensure_local_model_exists(args.model_name_or_path, "Base model", project_root=args.project_root)
+    ensure_local_model_exists(args.model_name_or_path, "Model", project_root=args.project_root)
+    if args.adapter_path is not None:
+        ensure_path_exists(args.adapter_path, "Adapter directory")
     ensure_local_model_exists(args.embed_model_name_or_path, "Embed model", project_root=args.project_root)
 
 
@@ -116,7 +119,11 @@ def main() -> None:
     save_json(args.output_dir / "missing_eval_refs.json", {"rows": missing_val_refs})
 
     model_source = resolve_model_source(args.model_name_or_path, project_root=args.project_root)
-    tokenizer_source = args.adapter_path if (args.adapter_path / "tokenizer_config.json").exists() else model_source
+    tokenizer_source = (
+        args.adapter_path
+        if args.adapter_path is not None and (args.adapter_path / "tokenizer_config.json").exists()
+        else model_source
+    )
     tokenizer = AutoTokenizer.from_pretrained(
         str(tokenizer_source),
         trust_remote_code=True,
@@ -133,14 +140,23 @@ def main() -> None:
         bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=compute_dtype,
     )
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_source,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-        cache_dir=cache_dir_as_str(args.cache_dir),
-    )
-    model = PeftModel.from_pretrained(base_model, str(args.adapter_path))
+    if args.adapter_path is not None:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_source,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+            cache_dir=cache_dir_as_str(args.cache_dir),
+        )
+        model = PeftModel.from_pretrained(base_model, str(args.adapter_path))
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_source,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+            cache_dir=cache_dir_as_str(args.cache_dir),
+        )
     model.eval()
     model.config.use_cache = True
 
