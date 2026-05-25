@@ -32,7 +32,7 @@ def _resolve_base_root() -> Path:
 def _resolve_model_root(project_root: Path) -> Path:
     if DEFAULT_LANTA_MODEL_ROOT.exists():
         return DEFAULT_LANTA_MODEL_ROOT
-    return project_root / "weight"
+    return project_root / "models"
 
 
 def _resolve_cache_root(project_root: Path) -> Path:
@@ -80,7 +80,7 @@ OUTPUT_JSON_PATH = _env_path(
 )
 MODEL_NAME_OR_PATH = _env_path(
     "CAMNET_SYNTH_MODEL_NAME_OR_PATH",
-    MODEL_ROOT / "typhoon2.5-qwen3-4b",
+    MODEL_ROOT / "gemma-4-31B-it",
     PROJECT_ROOT,
 )
 CACHE_DIR = _env_path(
