@@ -4,6 +4,7 @@ import argparse
 import gc
 import inspect
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -53,6 +54,11 @@ class JsonlLoggingCallback:
         with self.output_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
+    def __getattr__(self, name):
+        if name.startswith("on_"):
+            return lambda *args, **kwargs: None
+        raise AttributeError(name)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fine-tune typhoon2.5-qwen3-4b for Thai RAG QA")
@@ -71,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--num-train-epochs", type=int, default=3)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
+    parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-total-limit", type=int, default=2)
@@ -293,6 +300,16 @@ def main() -> None:
     model.print_trainable_parameters()
 
     bf16 = torch.cuda.is_bf16_supported()
+    if args.warmup_steps is None:
+        effective_batch_size = max(1, args.train_batch_size * args.gradient_accumulation_steps)
+        steps_per_epoch = max(1, math.ceil(len(train_dataset) / effective_batch_size))
+        total_training_steps = steps_per_epoch * max(1, math.ceil(args.num_train_epochs))
+        args.warmup_steps = max(0, int(total_training_steps * args.warmup_ratio))
+        print(
+            "Derived warmup_steps from warmup_ratio: "
+            f"warmup_ratio={args.warmup_ratio} total_training_steps={total_training_steps} "
+            f"warmup_steps={args.warmup_steps}"
+        )
     training_args_kwargs = {
         "output_dir": str(args.output_dir / "checkpoints"),
         "per_device_train_batch_size": args.train_batch_size,
@@ -300,7 +317,7 @@ def main() -> None:
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "learning_rate": args.learning_rate,
         "num_train_epochs": args.num_train_epochs,
-        "warmup_ratio": args.warmup_ratio,
+        "warmup_steps": args.warmup_steps,
         "weight_decay": args.weight_decay,
         "logging_steps": args.logging_steps,
         "save_strategy": "epoch",
