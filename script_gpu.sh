@@ -12,7 +12,7 @@
 set -euo pipefail
 
 REPO_ROOT="/project/zz991000-zdeva/zz991011/CAMNET_P"
-MODEL_ROOT="/project/zz991000-zdeva/zz991011/models"
+MODEL_ROOT="${CAMNET_MODEL_DIR:-/project/zz991000-zdeva/zz991011/models}"
 CACHE_ROOT="/project/zz991000-zdeva/zz991011/.cache"
 OUTPUT_DIR="$REPO_ROOT/artifacts/typhoon25_qwen3_4b_rag_qa_qlora"
 CONDA_ENV_NAME="three_env"

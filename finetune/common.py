@@ -24,7 +24,9 @@ from src.retrieval import hybrid_rerank
 
 
 LANTA_PROJECT_ROOT = Path("/project/zz991000-zdeva/zz991011/CAMNET_P")
-LANTA_MODEL_ROOT = Path("/project/zz991000-zdeva/zz991011/models")
+LANTA_MODEL_ROOT = Path(
+    os.environ.get("CAMNET_MODEL_DIR", "/project/zz991000-zdeva/zz991011/models")
+).expanduser()
 LANTA_CACHE_ROOT = Path("/project/zz991000-zdeva/zz991011/.cache")
 
 DEFAULT_ARTIFACT_NAME = "typhoon25_qwen3_4b_rag_qa_qlora"
