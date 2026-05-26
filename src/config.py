@@ -54,8 +54,20 @@ def _discover_test_path() -> Path:
     return Path("/model/test/test_set.json")
 
 
-def _resolve_llm_model_path(model_dir: Path) -> Path:
-    """Pick a real local LLM directory and never fall back to Hub implicitly."""
+def _resolve_model_dir() -> Path:
+    """Resolve the shared model root used by finetune and inference."""
+    env_value = os.environ.get("CAMNET_MODEL_DIR")
+    if env_value:
+        candidate = Path(env_value).expanduser()
+    else:
+        candidate = Path("/project/zz991000-zdeva/zz991011/models")
+    if not candidate.is_absolute():
+        candidate = (PROJECT_ROOT / candidate).resolve()
+    return candidate
+
+
+def _resolve_model_path(default_name: str) -> Path:
+    """Resolve a model path without probing the filesystem at import time."""
     env_value = os.environ.get("CAMNET_LLM_MODEL_PATH")
     if env_value:
         candidate = Path(env_value).expanduser()
@@ -64,35 +76,15 @@ def _resolve_llm_model_path(model_dir: Path) -> Path:
         return candidate
 
     model_name = os.environ.get("CAMNET_LLM_MODEL_NAME")
+    model_dir = MODEL_DIR
     if model_name:
         return model_dir / model_name
-
-    preferred_names = [
-        "final_merged",
-        "typhoon25_qwen3_4b_rag_qa_qlora",
-        "Qwen2.5-7B-Instruct",
-    ]
-    for preferred_name in preferred_names:
-        preferred = model_dir / preferred_name
-        if preferred.exists():
-            return preferred
-
-    candidates = sorted(
-        path for path in model_dir.iterdir()
-        if path.is_dir() and path.name != "bge-m3"
-    )
-    if len(candidates) == 1:
-        return candidates[0]
-
-    return model_dir / preferred_names[0]
+    return model_dir / default_name
 
 
 BASE_DIR = PROJECT_ROOT
 DATA_DIR = _resolve_path("CAMNET_DATA_DIR", PROJECT_ROOT / "data")
-MODEL_DIR = _resolve_path(
-    "CAMNET_MODEL_DIR",
-    _prefer_existing_path(Path("/model/weights"), PROJECT_ROOT / "weight"),
-)
+MODEL_DIR = _resolve_model_dir()
 OUTPUT_DIR = _resolve_path(
     "CAMNET_OUTPUT_DIR",
     _prefer_existing_path(Path("/result"), PROJECT_ROOT / "output"),
@@ -107,7 +99,7 @@ TEST_PATH = _resolve_path(
     _discover_test_path(),
 )
 BGE_MODEL_PATH = _resolve_path("CAMNET_BGE_MODEL_PATH", MODEL_DIR / "bge-m3")
-LLM_MODEL_PATH = _resolve_llm_model_path(MODEL_DIR)
+LLM_MODEL_PATH = _resolve_model_path("typhoon2.5-qwen3-4b")
 
 EVAL_SAMPLE_DIR = _resolve_path("CAMNET_EVAL_SAMPLE_DIR", DATA_DIR / "eval_sample")
 SUBMISSION_PATH = _resolve_path(
