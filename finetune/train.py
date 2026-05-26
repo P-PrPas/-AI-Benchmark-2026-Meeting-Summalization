@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-batch-size", type=int, default=1)
     parser.add_argument("--eval-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=16)
-    parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--num-train-epochs", type=int, default=3)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--warmup-steps", type=int)
@@ -112,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable-training-augmentation", action="store_true")
     parser.add_argument("--oracle-fraction", type=float, default=0.5)
     parser.add_argument("--noisy-fraction", type=float, default=0.3)
-    parser.add_argument("--synthetic-fraction", type=float, default=0.2)
+    parser.add_argument("--synthetic-fraction", type=float, default=0.0)
     return parser
 
 

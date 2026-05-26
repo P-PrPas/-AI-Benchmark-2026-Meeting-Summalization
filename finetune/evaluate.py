@@ -183,6 +183,7 @@ def main() -> None:
     prediction_rows = []
     gold_rows = []
     reranked_retrievals = []
+    predicted_profiles = {}
     for sample in val_raw_samples:
         dense_retrieved = retrieve_paragraphs(
             doc_embedding_index,
@@ -193,6 +194,8 @@ def main() -> None:
         )
         retrieved = hybrid_rerank(sample["query"], dense_retrieved)
         reranked_retrievals.append(retrieved)
+        predicted_profile = generator.detect_profile(sample["query"], retrieved)
+        predicted_profiles[sample["ID"]] = predicted_profile
         predicted_refs = select_references_from_retrieved(retrieved, n=args.reference_top_n)
         predicted_answer = generator.generate(
             sample["query"],
@@ -204,6 +207,7 @@ def main() -> None:
                 "ID": sample["ID"],
                 "abstractive": predicted_answer,
                 "refs": ",".join(predicted_refs),
+                "profile": predicted_profile,
             }
         )
         gold_rows.append(
@@ -218,7 +222,7 @@ def main() -> None:
     gold_df = pd.DataFrame(gold_rows)
     pred_df.to_csv(args.output_dir / "val_predictions.csv", index=False, encoding="utf-8")
 
-    metrics, _ = run_evaluation(gold_df, pred_df, embedder)
+    metrics, merged = run_evaluation(gold_df, pred_df, embedder)
     metrics.update(
         compute_retrieval_metrics(
             [sample["gold_refs"] for sample in val_raw_samples],
@@ -239,21 +243,34 @@ def main() -> None:
 
     failure_rows = []
     pred_lookup = {row["ID"]: row for row in prediction_rows}
+    merged_lookup = merged.set_index("ID").to_dict("index")
+    failure_counts = {}
     for sample, retrieved in zip(val_raw_samples, reranked_retrievals):
         pred = pred_lookup[sample["ID"]]
+        merged_row = merged_lookup[sample["ID"]]
         predicted_refs = set(pred["refs"].split(",")) if pred["refs"] else set()
         gold_refs = set(sample["gold_refs"])
         answer = pred["abstractive"]
+        detected_profile = predicted_profiles[sample["ID"]]
+        rouge_score = float(merged_row["rougeL"])
+        ss_score = float(merged_row["SS-score"])
         if not gold_refs.intersection({item["para_id"] for item in retrieved[:10]}):
             failure_type = "retrieval_miss"
+        elif ss_score > 0.8 and rouge_score < 0.4:
+            failure_type = "high_ss_low_rouge"
+        elif sample["profile"] == "fact" and detected_profile == "synthesis":
+            failure_type = "fact_routed_to_synthesis"
         elif "[P" in answer or answer.strip().startswith(("คำตอบ:", "ตอบ:")):
             failure_type = "formatting"
         elif len(answer) > runtime_config.FACT_MAX_ANSWER_CHARS and "\n" not in answer:
             failure_type = "overlong_answer"
+        elif predicted_refs == gold_refs and gold_refs:
+            failure_type = "reference_correct_answer_style_mismatch"
         elif predicted_refs != gold_refs and gold_refs:
             failure_type = "reference_mismatch"
         else:
             failure_type = "answer_style_or_semantics"
+        failure_counts[failure_type] = failure_counts.get(failure_type, 0) + 1
         failure_rows.append(
             {
                 "ID": sample["ID"],
@@ -264,10 +281,20 @@ def main() -> None:
                 "gold_refs": sample["gold_refs"],
                 "pred_refs": sorted(predicted_refs),
                 "top_retrieved": [item["para_id"] for item in retrieved[:5]],
+                "gold_profile": sample["profile"],
+                "pred_profile": detected_profile,
+                "rougeL": rouge_score,
+                "SS-score": ss_score,
             }
         )
-    failure_rows.sort(key=lambda row: row["failure_type"])
-    save_json(args.output_dir / "failure_analysis.json", {"rows": failure_rows[:50]})
+    failure_rows.sort(key=lambda row: (row["failure_type"], row["rougeL"]))
+    save_json(
+        args.output_dir / "failure_analysis.json",
+        {
+            "summary": failure_counts,
+            "rows": failure_rows[:50],
+        },
+    )
 
     print(f"Validation samples={len(val_raw_samples)}")
     print(f"Saved predictions to {args.output_dir / 'val_predictions.csv'}")

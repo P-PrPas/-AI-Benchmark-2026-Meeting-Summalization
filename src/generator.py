@@ -43,7 +43,7 @@ DECODE_PROFILES = {
     ),
     ANSWER_PROFILE_SYNTHESIS: DecodeProfile(
         name=ANSWER_PROFILE_SYNTHESIS,
-        max_new_tokens=config.AGGREGATE_MAX_NEW_TOKENS,
+        max_new_tokens=config.SYNTHESIS_MAX_NEW_TOKENS,
         repetition_penalty=config.DEFAULT_REPETITION_PENALTY,
     ),
 }

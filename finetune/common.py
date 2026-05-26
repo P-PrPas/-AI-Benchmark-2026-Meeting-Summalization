@@ -364,7 +364,7 @@ def build_augmented_training_samples(
     seed: int,
     oracle_fraction: float = 0.5,
     noisy_fraction: float = 0.3,
-    synthetic_fraction: float = 0.2,
+    synthetic_fraction: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     oracle_samples, missing_refs = build_raw_samples(queries, doc_lookup)
     total_oracle = len(oracle_samples)
@@ -405,7 +405,7 @@ def build_augmented_training_samples(
                 "ID": f"{sample['ID']}::noisy",
                 "context": build_ranked_context_from_paragraphs(
                     sample["query"],
-                    reranked[: config.GENERATOR_CONTEXT_K_AGGREGATE],
+                    reranked[: context_limit_for_profile(profile)],
                     profile=profile,
                 ),
                 "mode": "noisy_retrieved",
@@ -451,7 +451,7 @@ def tokenize_supervised_sample(
 ) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
     prompt_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": build_user_prompt(sample["context"], sample["query"])},
+        {"role": "user", "content": build_user_prompt(sample["context"], sample["query"], profile=sample["profile"])},
     ]
     full_messages = prompt_messages + [{"role": "assistant", "content": sample["answer"]}]
 

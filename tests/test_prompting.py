@@ -20,6 +20,8 @@ class PromptingTests(unittest.TestCase):
         self.assertIn("ข้อมูลอ้างอิงที่เกี่ยวข้องมากที่สุด", prompt)
         self.assertIn("1. [P10]", prompt)
         self.assertIn("ข้อมูลด้านบนเรียงจากเกี่ยวข้องมากไปน้อย", prompt)
+        self.assertIn("วัตถุประสงค์ของการประชุมครั้งนี้", prompt)
+        self.assertNotIn("ยานยนต์ไฟฟ้า", prompt)
 
     def test_sanitize_generated_answer_removes_tags_prefix_and_ellipsis(self):
         raw = "คำตอบ: [P12] ที่ประชุมมีมติรับทราบรายงานผลการดำเนินงาน...\n[P12] ที่ประชุมมีมติรับทราบรายงานผลการดำเนินงาน"
@@ -45,6 +47,19 @@ class PromptingTests(unittest.TestCase):
         ]
         profile = detect_answer_profile("คณะกรรมาธิการมีข้อสังเกตอย่างไรเกี่ยวกับการส่งเสริมยานยนต์ไฟฟ้า", paragraphs)
         self.assertEqual(profile, ANSWER_PROFILE_SYNTHESIS)
+
+    def test_detect_answer_profile_keeps_fact_even_with_many_paragraphs(self):
+        paragraphs = [
+            {"para_id": f"P{i}", "text": f"ย่อหน้าที่ {i} กล่าวถึงการดำเนินงานต่อเนื่องของหน่วยงาน"} for i in range(1, 7)
+        ]
+        profile = detect_answer_profile("ประธานการประชุมคือใคร", paragraphs)
+        self.assertEqual(profile, ANSWER_PROFILE_FACT)
+
+    def test_build_user_prompt_for_list_keeps_numbered_example(self):
+        paragraphs = [{"para_id": "P1", "text": "1. กระทรวงมหาดไทย 2. กรมป้องกันและบรรเทาสาธารณภัย"}]
+        prompt = build_user_prompt(paragraphs, "มีหน่วยงานใดบ้าง", profile=ANSWER_PROFILE_LIST)
+        self.assertIn("1. ปลัดกระทรวงมหาดไทย", prompt)
+        self.assertNotIn("สถานการณ์อุทกภัยในพื้นที่เริ่มคลี่คลายลง", prompt)
 
 
 if __name__ == "__main__":
