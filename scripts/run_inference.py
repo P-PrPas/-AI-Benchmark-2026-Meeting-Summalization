@@ -14,16 +14,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from src import config
 from src.data_loader import load_dataset
 from src.embedder import Embedder, FAISSRetriever
-from src.retrieval import retrieve_references, select_references_from_retrieved
+from src.retrieval import hybrid_rerank, select_references_from_retrieved
 from src.generator import Generator
 import pandas as pd
 
 
 def predict_single(retriever, query, doc_id, generator=None, retrieval_top_k=10, reference_top_n=3):
     """Predict for a single query."""
-    retrieved = retriever.retrieve(doc_id, query, top_k=retrieval_top_k)
+    retrieved = hybrid_rerank(query, retriever.retrieve(doc_id, query, top_k=retrieval_top_k))
 
-    refs = select_references_from_retrieved(retrieved, n=reference_top_n, score_threshold=0.3)
+    refs = select_references_from_retrieved(retrieved, n=reference_top_n)
 
     abstractive = generator.generate(query, retrieved) if generator else ""
 
@@ -106,9 +106,9 @@ def main():
     parser = argparse.ArgumentParser(description="Run inference on test set")
     parser.add_argument("--output", "-o", default=os.path.join(config.OUTPUT_DIR, "submission.csv"),
                         help="Output path for submission.csv")
-    parser.add_argument("--retrieval-top-k", type=int, default=10,
+    parser.add_argument("--retrieval-top-k", type=int, default=config.RETRIEVAL_CANDIDATE_K,
                         help="Number of paragraphs to retrieve")
-    parser.add_argument("--reference-top-n", type=int, default=3,
+    parser.add_argument("--reference-top-n", type=int, default=config.REFERENCE_TOP_N,
                         help="Number of references to select")
     parser.add_argument("--data", choices=["train", "test"], default="test",
                         help="Dataset to run inference on")

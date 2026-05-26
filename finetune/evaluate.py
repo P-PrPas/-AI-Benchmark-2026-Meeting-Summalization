@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-from src.prompting import NO_ANSWER_TEXT, NO_CONTEXT_TEXT, sanitize_generated_answer
-
+from src import config as runtime_config
+from src.generator import Generator
+from src.retrieval import compute_retrieval_metrics, hybrid_rerank, select_references_from_retrieved
 from .common import (
     DEFAULT_ARTIFACT_NAME,
     DEFAULT_BASE_MODEL_PATH,
@@ -15,20 +16,17 @@ from .common import (
     SYSTEM_PROMPT,
     build_document_embedding_index,
     build_raw_samples,
-    build_user_prompt,
     cache_dir_as_str,
     configure_cache_env,
     ensure_local_model_exists,
     ensure_path_exists,
     filter_queries_by_ids,
-    get_model_device,
     load_json,
     load_training_data,
     resolve_model_source,
     resolve_path,
     run_evaluation,
     save_json,
-    select_top_refs,
     retrieve_paragraphs,
 )
 
@@ -48,10 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
     parser.add_argument("--output-dir")
     parser.add_argument("--cache-dir", default=str(LANTA_CACHE_ROOT))
-    parser.add_argument("--max-seq-len", type=int, default=4096)
-    parser.add_argument("--max-new-tokens", type=int, default=384)
-    parser.add_argument("--retrieval-top-k", type=int, default=10)
-    parser.add_argument("--reference-top-n", type=int, default=3)
+    parser.add_argument("--max-seq-len", type=int, default=runtime_config.GENERATOR_MAX_SEQ_LEN)
+    parser.add_argument("--retrieval-top-k", type=int, default=runtime_config.RETRIEVAL_CANDIDATE_K)
+    parser.add_argument("--reference-top-n", type=int, default=runtime_config.REFERENCE_TOP_N)
     return parser
 
 
@@ -178,52 +175,29 @@ def main() -> None:
 
     doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
-    @torch.inference_mode()
-    def generate_answer(query: str, paragraphs: list[dict[str, str]]) -> str:
-        context = "\n".join(f"[{paragraph['para_id']}] {paragraph['text']}" for paragraph in paragraphs)
-        if not context.strip():
-            context = NO_CONTEXT_TEXT
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(context, query)},
-        ]
-        prompt_text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        inputs = tokenizer(
-            prompt_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=args.max_seq_len,
-        )
-        device = get_model_device(model)
-        inputs = {key: value.to(device) for key, value in inputs.items()}
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=args.max_new_tokens,
-            do_sample=False,
-            repetition_penalty=1.05,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
-        answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        return sanitize_generated_answer(answer) or NO_ANSWER_TEXT
+    generator = Generator(system_prompt=SYSTEM_PROMPT)
+    generator.model = model
+    generator.tokenizer = tokenizer
 
     prediction_rows = []
     gold_rows = []
+    reranked_retrievals = []
     for sample in val_raw_samples:
-        retrieved = retrieve_paragraphs(
+        dense_retrieved = retrieve_paragraphs(
             doc_embedding_index,
             sample["doc_id"],
             sample["query"],
             embedder,
             args.retrieval_top_k,
         )
-        predicted_refs = select_top_refs(retrieved, args.reference_top_n)
-        predicted_answer = generate_answer(sample["query"], retrieved[: args.retrieval_top_k])
+        retrieved = hybrid_rerank(sample["query"], dense_retrieved)
+        reranked_retrievals.append(retrieved)
+        predicted_refs = select_references_from_retrieved(retrieved, n=args.reference_top_n)
+        predicted_answer = generator.generate(
+            sample["query"],
+            retrieved,
+            max_seq_len=args.max_seq_len,
+        )
         prediction_rows.append(
             {
                 "ID": sample["ID"],
@@ -244,7 +218,55 @@ def main() -> None:
     pred_df.to_csv(args.output_dir / "val_predictions.csv", index=False, encoding="utf-8")
 
     metrics, _ = run_evaluation(gold_df, pred_df, embedder)
+    metrics.update(
+        compute_retrieval_metrics(
+            [sample["gold_refs"] for sample in val_raw_samples],
+            reranked_retrievals,
+        )
+    )
+    answer_lengths = [len(row["abstractive"]) for row in prediction_rows]
+    malformed = [
+        row for row in prediction_rows
+        if "[P" in row["abstractive"]
+        or row["abstractive"].strip().startswith(("คำตอบ:", "ตอบ:"))
+        or row["abstractive"].strip().endswith(("...", "…"))
+    ]
+    metrics["pred_answer_length_median"] = float(pd.Series(answer_lengths).median()) if answer_lengths else 0.0
+    metrics["pred_answer_length_mean"] = float(pd.Series(answer_lengths).mean()) if answer_lengths else 0.0
+    metrics["format_error_rate"] = len(malformed) / max(1, len(prediction_rows))
     save_json(args.output_dir / "validation_metrics.json", metrics)
+
+    failure_rows = []
+    pred_lookup = {row["ID"]: row for row in prediction_rows}
+    for sample, retrieved in zip(val_raw_samples, reranked_retrievals):
+        pred = pred_lookup[sample["ID"]]
+        predicted_refs = set(pred["refs"].split(",")) if pred["refs"] else set()
+        gold_refs = set(sample["gold_refs"])
+        answer = pred["abstractive"]
+        if not gold_refs.intersection({item["para_id"] for item in retrieved[:10]}):
+            failure_type = "retrieval_miss"
+        elif "[P" in answer or answer.strip().startswith(("คำตอบ:", "ตอบ:")):
+            failure_type = "formatting"
+        elif len(answer) > runtime_config.FACT_MAX_ANSWER_CHARS and "\n" not in answer:
+            failure_type = "overlong_answer"
+        elif predicted_refs != gold_refs and gold_refs:
+            failure_type = "reference_mismatch"
+        else:
+            failure_type = "answer_style_or_semantics"
+        failure_rows.append(
+            {
+                "ID": sample["ID"],
+                "failure_type": failure_type,
+                "query": sample["query"],
+                "gold_answer": sample["answer"],
+                "pred_answer": answer,
+                "gold_refs": sample["gold_refs"],
+                "pred_refs": sorted(predicted_refs),
+                "top_retrieved": [item["para_id"] for item in retrieved[:5]],
+            }
+        )
+    failure_rows.sort(key=lambda row: row["failure_type"])
+    save_json(args.output_dir / "failure_analysis.json", {"rows": failure_rows[:50]})
 
     print(f"Validation samples={len(val_raw_samples)}")
     print(f"Saved predictions to {args.output_dir / 'val_predictions.csv'}")

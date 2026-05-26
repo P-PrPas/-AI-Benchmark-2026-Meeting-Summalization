@@ -8,6 +8,8 @@ import math
 import sys
 from pathlib import Path
 
+from src import config as runtime_config
+
 from .common import (
     DEFAULT_ARTIFACT_NAME,
     DEFAULT_BASE_MODEL_PATH,
@@ -15,6 +17,8 @@ from .common import (
     LANTA_CACHE_ROOT,
     LANTA_PROJECT_ROOT,
     SupervisedDataCollator,
+    build_augmented_training_samples,
+    build_document_embedding_index,
     build_raw_samples,
     build_split_metadata,
     build_tokenized_dataset,
@@ -68,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
     parser.add_argument("--output-dir")
     parser.add_argument("--cache-dir", default=str(LANTA_CACHE_ROOT))
-    parser.add_argument("--max-seq-len", type=int, default=4096)
+    parser.add_argument("--max-seq-len", type=int, default=runtime_config.GENERATOR_MAX_SEQ_LEN)
     parser.add_argument("--val-doc-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-batch-size", type=int, default=1)
@@ -105,6 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--debug-max-train-samples", type=int)
     parser.add_argument("--debug-max-val-samples", type=int)
+    parser.add_argument("--disable-training-augmentation", action="store_true")
+    parser.add_argument("--oracle-fraction", type=float, default=0.5)
+    parser.add_argument("--noisy-fraction", type=float, default=0.3)
+    parser.add_argument("--synthetic-fraction", type=float, default=0.2)
     return parser
 
 
@@ -141,6 +149,11 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  artifact_name={DEFAULT_ARTIFACT_NAME}")
     print(f"  skip_merge={args.skip_merge}")
     print(f"  merge_dtype={args.merge_dtype}")
+    print(f"  disable_training_augmentation={args.disable_training_augmentation}")
+    print(
+        "  training_mix="
+        f"oracle:{args.oracle_fraction} noisy:{args.noisy_fraction} synthetic:{args.synthetic_fraction}"
+    )
 
 
 def resolve_merge_dtype(torch_module, merge_dtype: str):
@@ -201,6 +214,7 @@ def main() -> None:
 
     import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from sentence_transformers import SentenceTransformer
     from transformers import (
         AutoModelForCausalLM,
         AutoTokenizer,
@@ -224,7 +238,29 @@ def main() -> None:
     if args.debug_max_val_samples is not None:
         val_queries = val_queries[: args.debug_max_val_samples]
 
-    train_raw_samples, train_missing_refs = build_raw_samples(train_queries, doc_lookup)
+    embed_source = resolve_model_source(args.embed_model_name_or_path, project_root=args.project_root)
+    embedder = SentenceTransformer(
+        embed_source,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        cache_folder=cache_dir_as_str(args.cache_dir),
+    )
+    train_docs = [doc_lookup[doc_id] for doc_id in sorted(train_doc_ids)]
+    train_doc_embedding_index = build_document_embedding_index(train_docs, embedder)
+
+    if args.disable_training_augmentation:
+        train_raw_samples, train_missing_refs = build_raw_samples(train_queries, doc_lookup)
+        augmentation_counts = {"oracle": len(train_raw_samples), "noisy_retrieved": 0, "synthetic_style": 0}
+    else:
+        train_raw_samples, train_missing_refs, augmentation_counts = build_augmented_training_samples(
+            train_queries,
+            doc_lookup,
+            train_doc_embedding_index,
+            embedder,
+            seed=args.seed,
+            oracle_fraction=args.oracle_fraction,
+            noisy_fraction=args.noisy_fraction,
+            synthetic_fraction=args.synthetic_fraction,
+        )
     val_raw_samples, val_missing_refs = build_raw_samples(val_queries, doc_lookup)
 
     model_source = resolve_model_source(args.model_name_or_path, project_root=args.project_root)
@@ -262,10 +298,12 @@ def main() -> None:
     save_json(args.output_dir / "split_metadata.json", split_metadata)
     save_json(args.output_dir / "missing_train_refs.json", {"rows": train_missing_refs})
     save_json(args.output_dir / "missing_val_refs.json", {"rows": val_missing_refs})
+    save_json(args.output_dir / "training_mix_counts.json", augmentation_counts)
 
     print(f"Loaded docs={len(docs)} queries={len(queries)}")
     print(f"Train docs={len(train_doc_ids)} val docs={len(val_doc_ids)}")
     print(f"Train samples={len(train_raw_samples)} val samples={len(val_raw_samples)}")
+    print(f"Training mix counts={augmentation_counts}")
     print(f"Tokenized train rows={len(train_dataset)} dropped={len(dropped_train)}")
     print(f"Tokenized val rows={len(val_dataset)} dropped={len(dropped_val)}")
 

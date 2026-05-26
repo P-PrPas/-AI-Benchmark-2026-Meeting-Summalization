@@ -7,7 +7,20 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from src.prompting import NO_CONTEXT_TEXT, SYSTEM_PROMPT, build_user_prompt
+from src import config
+from src.prompting import (
+    ANSWER_PROFILE_FACT,
+    ANSWER_PROFILE_LIST,
+    ANSWER_PROFILE_SYNTHESIS,
+    NO_ANSWER_TEXT,
+    NO_CONTEXT_TEXT,
+    SYSTEM_PROMPT,
+    build_user_prompt,
+    context_limit_for_profile,
+    detect_answer_profile,
+    format_ranked_context,
+)
+from src.retrieval import hybrid_rerank
 
 
 LANTA_PROJECT_ROOT = Path("/project/zz991000-zdeva/zz991011/CAMNET_P")
@@ -155,6 +168,151 @@ def ordered_ref_paragraphs(
     return ordered, missing
 
 
+def build_ranked_context_from_paragraphs(
+    query: str,
+    paragraphs: Sequence[dict[str, Any]],
+    *,
+    profile: str | None = None,
+) -> str:
+    profile = profile or detect_answer_profile(query, paragraphs)
+    return format_ranked_context(
+        paragraphs,
+        primary_count=context_limit_for_profile(profile),
+    )
+
+
+def _query_subject_prefix(query: str) -> str:
+    cleaned = re.sub(r"\s+", " ", query).strip().rstrip(" ?")
+    suffixes = (
+        "คืออะไร",
+        "คือใคร",
+        "คือที่ใด",
+        "คือที่ไหน",
+        "คือเมื่อใด",
+        "ได้แก่อะไรบ้าง",
+        "ได้แก่ใครบ้าง",
+        "มีอะไรบ้าง",
+        "มีใครบ้าง",
+        "อย่างไร",
+        "เมื่อใด",
+        "ที่ใด",
+        "ที่ไหน",
+        "หรือไม่",
+        "เพราะเหตุใด",
+        "เหตุใด",
+        "ทำไม",
+    )
+    for suffix in suffixes:
+        if cleaned.endswith(suffix):
+            return cleaned[: -len(suffix)].strip()
+    return cleaned
+
+
+def synthesize_style_variants(sample: dict[str, Any]) -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    answer = sample["answer"].strip()
+    query = sample["query"].strip()
+    if not answer or answer == NO_ANSWER_TEXT:
+        return variants
+
+    if re.search(r"(?m)\b1\.", answer):
+        normalized_lines = []
+        for item in re.split(r"(?=\b\d+\.)", answer.replace("\n", " ")):
+            item = item.strip()
+            if item:
+                normalized_lines.append(item)
+        rewritten = "\n".join(normalized_lines)
+        if rewritten and rewritten != answer:
+            variants.append(
+                {
+                    **sample,
+                    "ID": f"{sample['ID']}::synthetic_list",
+                    "answer": rewritten,
+                    "mode": "synthetic_style",
+                    "profile": ANSWER_PROFILE_LIST,
+                }
+            )
+
+    if "\n" not in answer and len(answer) > 260:
+        sentences = re.split(r"(?<=[.!?])\s+", answer)
+        rewritten = "\n".join(part.strip() for part in sentences if part.strip())
+        if rewritten and rewritten != answer:
+            variants.append(
+                {
+                    **sample,
+                    "ID": f"{sample['ID']}::synthetic_synthesis",
+                    "answer": rewritten,
+                    "mode": "synthetic_style",
+                    "profile": ANSWER_PROFILE_SYNTHESIS,
+                }
+            )
+
+    subject_prefix = _query_subject_prefix(query)
+    if (
+        subject_prefix
+        and "\n" not in answer
+        and len(answer) <= 220
+        and not answer.startswith(subject_prefix)
+        and not re.search(r"(?m)\b1\.", answer)
+    ):
+        rewritten = f"{subject_prefix} {answer}".strip()
+        if rewritten != answer:
+            variants.append(
+                {
+                    **sample,
+                    "ID": f"{sample['ID']}::synthetic_fact",
+                    "answer": rewritten,
+                    "mode": "synthetic_style",
+                    "profile": ANSWER_PROFILE_FACT,
+                }
+            )
+
+    return variants
+
+
+def synthesize_no_answer_samples(
+    queries: Sequence[dict[str, Any]],
+    doc_lookup: dict[str, dict[str, Any]],
+    *,
+    limit: int,
+    seed: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    rng = random.Random(seed)
+    shuffled = list(queries)
+    rng.shuffle(shuffled)
+    doc_ids = sorted(doc_lookup)
+    results: list[dict[str, Any]] = []
+    for query in shuffled:
+        foreign_doc_ids = [doc_id for doc_id in doc_ids if doc_id != query["doc_id"]]
+        if not foreign_doc_ids:
+            continue
+        doc_id = foreign_doc_ids[rng.randrange(len(foreign_doc_ids))]
+        doc = doc_lookup[doc_id]
+        paragraphs = doc.get("paragraphs", [])[: config.GENERATOR_CONTEXT_K_FACT]
+        context = build_ranked_context_from_paragraphs(
+            query["query"].strip(),
+            paragraphs,
+            profile=ANSWER_PROFILE_FACT,
+        )
+        results.append(
+            {
+                "ID": f"{query['ID']}::synthetic_no_answer",
+                "doc_id": doc_id,
+                "query": query["query"].strip(),
+                "answer": NO_ANSWER_TEXT,
+                "context": context,
+                "gold_refs": [],
+                "mode": "synthetic_style",
+                "profile": ANSWER_PROFILE_FACT,
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
 def build_raw_samples(
     queries: Sequence[dict[str, Any]],
     doc_lookup: dict[str, dict[str, Any]],
@@ -166,11 +324,7 @@ def build_raw_samples(
         if doc is None:
             raise KeyError(f"doc_id {query['doc_id']} from query {query['ID']} is missing from docs")
         ordered_refs, missing_refs = ordered_ref_paragraphs(doc, query.get("refs", []))
-        context_lines = [
-            f"[{paragraph['para_id']}] {paragraph['text'].strip()}"
-            for paragraph in ordered_refs
-            if paragraph.get("text", "").strip()
-        ]
+        profile = detect_answer_profile(query["query"], ordered_refs)
         if missing_refs:
             missing_ref_records.append({"ID": query["ID"], "missing_refs": missing_refs})
         samples.append(
@@ -179,11 +333,108 @@ def build_raw_samples(
                 "doc_id": query["doc_id"],
                 "query": query["query"].strip(),
                 "answer": query["abstractive"].strip(),
-                "context": "\n".join(context_lines) if context_lines else NO_CONTEXT_TEXT,
+                "context": build_ranked_context_from_paragraphs(
+                    query["query"].strip(),
+                    ordered_refs,
+                    profile=profile,
+                )
+                if ordered_refs
+                else NO_CONTEXT_TEXT,
                 "gold_refs": list(query.get("refs", [])),
+                "mode": "oracle",
+                "profile": profile,
             }
         )
     return samples, missing_ref_records
+
+
+def build_augmented_training_samples(
+    queries: Sequence[dict[str, Any]],
+    doc_lookup: dict[str, dict[str, Any]],
+    doc_embedding_index: dict[str, dict[str, Any]],
+    embedder: Any,
+    *,
+    seed: int,
+    oracle_fraction: float = 0.5,
+    noisy_fraction: float = 0.3,
+    synthetic_fraction: float = 0.2,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+    oracle_samples, missing_refs = build_raw_samples(queries, doc_lookup)
+    total_oracle = len(oracle_samples)
+    if total_oracle == 0:
+        return oracle_samples, missing_refs, {"oracle": 0, "noisy_retrieved": 0, "synthetic_style": 0}
+
+    noisy_target = int(round(total_oracle * (noisy_fraction / max(oracle_fraction, 1e-6))))
+    synthetic_target = int(round(total_oracle * (synthetic_fraction / max(oracle_fraction, 1e-6))))
+
+    noisy_candidates: list[dict[str, Any]] = []
+    for sample in oracle_samples:
+        retrieved = retrieve_paragraphs(
+            doc_embedding_index,
+            sample["doc_id"],
+            sample["query"],
+            embedder,
+            config.RETRIEVAL_CANDIDATE_K,
+        )
+        reranked = hybrid_rerank(sample["query"], retrieved)
+        if not reranked:
+            continue
+        gold_refs = set(sample["gold_refs"])
+        if gold_refs:
+            existing = {item["para_id"] for item in reranked}
+            doc = doc_lookup[sample["doc_id"]]
+            missing_gold = [
+                paragraph for paragraph in doc["paragraphs"]
+                if paragraph["para_id"] in gold_refs and paragraph["para_id"] not in existing
+            ]
+            reranked = reranked + [
+                {"para_id": paragraph["para_id"], "text": paragraph["text"], "score": -1.0}
+                for paragraph in missing_gold
+            ]
+        profile = detect_answer_profile(sample["query"], reranked)
+        noisy_candidates.append(
+            {
+                **sample,
+                "ID": f"{sample['ID']}::noisy",
+                "context": build_ranked_context_from_paragraphs(
+                    sample["query"],
+                    reranked[: config.GENERATOR_CONTEXT_K_AGGREGATE],
+                    profile=profile,
+                ),
+                "mode": "noisy_retrieved",
+                "profile": profile,
+            }
+        )
+
+    rng = random.Random(seed)
+    rng.shuffle(noisy_candidates)
+    noisy_samples = noisy_candidates[:noisy_target]
+
+    synthetic_candidates: list[dict[str, Any]] = []
+    for sample in oracle_samples:
+        synthetic_candidates.extend(synthesize_style_variants(sample))
+    rng.shuffle(synthetic_candidates)
+    synthetic_samples = synthetic_candidates[:synthetic_target]
+
+    max_no_answer = max(1, int(round(synthetic_target * 0.05))) if synthetic_target > 0 else 0
+    remaining_synthetic_slots = max(0, synthetic_target - len(synthetic_samples))
+    no_answer_limit = min(max_no_answer, remaining_synthetic_slots)
+    synthetic_samples.extend(
+        synthesize_no_answer_samples(
+            queries,
+            doc_lookup,
+            limit=no_answer_limit,
+            seed=seed,
+        )
+    )
+
+    all_samples = oracle_samples + noisy_samples + synthetic_samples
+    counts = {
+        "oracle": len(oracle_samples),
+        "noisy_retrieved": len(noisy_samples),
+        "synthetic_style": len(synthetic_samples),
+    }
+    return all_samples, missing_refs, counts
 
 
 def tokenize_supervised_sample(
@@ -433,11 +684,3 @@ def retrieve_paragraphs(
         }
         for idx in top_indices
     ]
-
-
-def select_top_refs(retrieved: Sequence[dict[str, Any]], top_n: int) -> list[str]:
-    return [item["para_id"] for item in retrieved[:top_n]]
-
-
-def get_model_device(model: Any):
-    return next(model.parameters()).device

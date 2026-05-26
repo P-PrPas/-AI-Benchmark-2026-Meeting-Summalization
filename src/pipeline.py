@@ -6,7 +6,7 @@ import pandas as pd
 
 from .data_loader import load_dataset, get_document_paragraphs, get_queries, get_paragraph_by_id
 from .embedder import Embedder, FAISSRetriever
-from .retrieval import retrieve_references, select_references_from_retrieved
+from .retrieval import hybrid_rerank, select_references_from_retrieved
 from .generator import Generator
 from . import config
 
@@ -18,8 +18,8 @@ class SummarizationPipeline:
         self,
         embedder: Optional[Embedder] = None,
         generator: Optional[Generator] = None,
-        retrieval_top_k: int = 10,
-        reference_top_n: int = 3
+        retrieval_top_k: int = config.RETRIEVAL_CANDIDATE_K,
+        reference_top_n: int = config.REFERENCE_TOP_N
     ):
         self.embedder = embedder or Embedder()
         self.generator = generator or Generator()
@@ -46,11 +46,12 @@ class SummarizationPipeline:
         Returns:
             Dict with keys: ID, query, doc_id, abstractive, refs
         """
-        retrieved = self.retriever.retrieve(doc_id, query, self.retrieval_top_k)
-
-        top_refs = retrieve_references(
-            self.retriever, doc_id, query, self.reference_top_n
+        retrieved = hybrid_rerank(
+            query,
+            self.retriever.retrieve(doc_id, query, self.retrieval_top_k),
         )
+
+        top_refs = select_references_from_retrieved(retrieved, n=self.reference_top_n)
 
         abstractive = self.generator.generate(query, retrieved)
 
