@@ -1,12 +1,51 @@
 from __future__ import annotations
 
+import math
 import re
-from typing import Dict, Iterable, List, Sequence, Tuple
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
 from . import config
-from .embedder import Embedder, FAISSRetriever
+from .prompting import ANSWER_PROFILE_FACT, ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS
+
+if TYPE_CHECKING:
+    from .embedder import Embedder, FAISSRetriever
+
+
+_QUERY_REWRITE_REPLACEMENTS = (
+    ("กมธ.", "คณะกรรมาธิการ"),
+    ("ครม.", "คณะรัฐมนตรี"),
+    ("รมว.", "รัฐมนตรีว่าการ"),
+    ("รองฯ", "รอง"),
+)
+_QUERY_TRAILING_PATTERNS = (
+    "คืออะไร",
+    "คือใคร",
+    "คือที่ใด",
+    "คือที่ไหน",
+    "คือเมื่อใด",
+    "มีอะไรบ้าง",
+    "ได้แก่อะไรบ้าง",
+    "ได้แก่ใครบ้าง",
+    "อย่างไร",
+    "เมื่อใด",
+    "ที่ใด",
+    "ที่ไหน",
+    "หรือไม่",
+)
+
+
+@dataclass(frozen=True)
+class ReferenceSelectionConfig:
+    max_refs: int = config.REFERENCE_TOP_N_MAX
+    top2_min: float = config.REF_SELECTION_TOP2_MIN
+    top3_min: float = config.REF_SELECTION_TOP3_MIN
+    fact_max_gap: float = config.REF_SELECTION_FACT_MAX_GAP
+    aggregate_max_gap: float = config.REF_SELECTION_AGG_MAX_GAP
+    low_confidence_top1: float = config.REF_SELECTION_LOW_CONFIDENCE
+    max_entropy: float = config.QUERY_REFINEMENT_MAX_ENTROPY
 
 
 def tokenize_for_overlap(text: str) -> List[str]:
@@ -32,6 +71,27 @@ def _normalize_scores(values: Sequence[float]) -> List[float]:
         return [1.0 for _ in values]
     normalized = (arr - arr.min()) / (arr.max() - arr.min())
     return normalized.tolist()
+
+
+def _softmax(values: Sequence[float]) -> List[float]:
+    if not values:
+        return []
+    arr = np.asarray(values, dtype=np.float32)
+    arr = arr - float(arr.max())
+    exps = np.exp(arr)
+    denom = float(exps.sum())
+    if denom <= 0:
+        return [1.0 / len(values) for _ in values]
+    return (exps / denom).tolist()
+
+
+def normalized_score_entropy(values: Sequence[float]) -> float:
+    probs = _softmax(values)
+    if not probs:
+        return 0.0
+    entropy = -sum(prob * math.log(max(prob, 1e-8)) for prob in probs)
+    max_entropy = math.log(len(probs)) if len(probs) > 1 else 1.0
+    return float(entropy / max(max_entropy, 1e-8))
 
 
 def hybrid_rerank(
@@ -68,6 +128,84 @@ def hybrid_rerank(
         )
     reranked.sort(key=lambda item: item["hybrid_score"], reverse=True)
     return reranked
+
+
+def neural_rerank(
+    query: str,
+    retrieved: Sequence[Dict],
+    reranker,
+    *,
+    top_k: int = config.RERANK_TOP_K,
+) -> List[Dict]:
+    if not retrieved or reranker is None:
+        return list(retrieved)
+    limit = min(len(retrieved), top_k)
+    rescored = reranker.rerank(query, list(retrieved[:limit]), top_k=limit)
+    rerank_scores = [float(item.get("rerank_score", 0.0)) for item in rescored[:limit]]
+    rerank_norm = _normalize_scores(rerank_scores)
+    merged: List[Dict] = []
+    for item, rerank_scaled in zip(rescored[:limit], rerank_norm):
+        hybrid_score = float(item.get("hybrid_score", item.get("score", 0.0)))
+        final_score = 0.85 * rerank_scaled + 0.15 * hybrid_score
+        merged.append(
+            {
+                **item,
+                "rerank_scaled": rerank_scaled,
+                "selection_score": final_score,
+                "score": final_score,
+            }
+        )
+    merged.sort(key=lambda item: item["selection_score"], reverse=True)
+    if limit < len(retrieved):
+        merged.extend(retrieved[limit:])
+    return merged
+
+
+def rerank_retrieved(
+    query: str,
+    dense_retrieved: Sequence[Dict],
+    *,
+    reranker=None,
+    rerank_top_k: int = config.RERANK_TOP_K,
+) -> List[Dict]:
+    hybrid = hybrid_rerank(query, dense_retrieved)
+    return neural_rerank(query, hybrid, reranker, top_k=rerank_top_k)
+
+
+def rewrite_query_heuristic(query: str) -> str:
+    rewritten = re.sub(r"\s+", " ", (query or "").strip())
+    for src, dst in _QUERY_REWRITE_REPLACEMENTS:
+        rewritten = rewritten.replace(src, dst)
+    rewritten = rewritten.rstrip(" ?")
+    for suffix in _QUERY_TRAILING_PATTERNS:
+        if rewritten.endswith(suffix):
+            rewritten = rewritten[: -len(suffix)].strip()
+            break
+    rewritten = re.sub(r"\s+", " ", rewritten).strip()
+    return rewritten or query.strip()
+
+
+def needs_query_refinement(
+    retrieved: Sequence[Dict],
+    profile: str,
+    calibration_config: ReferenceSelectionConfig | None = None,
+) -> bool:
+    calibration_config = calibration_config or ReferenceSelectionConfig()
+    if not config.ENABLE_QUERY_REFINEMENT or not retrieved:
+        return False
+    top_scores = [float(item.get("score", 0.0)) for item in retrieved[:5]]
+    if not top_scores:
+        return False
+    top1 = top_scores[0]
+    top2 = top_scores[1] if len(top_scores) > 1 else 0.0
+    entropy = normalized_score_entropy(top_scores)
+    if top1 < calibration_config.low_confidence_top1:
+        return True
+    if entropy > calibration_config.max_entropy:
+        return True
+    if profile == ANSWER_PROFILE_FACT and abs(top1 - top2) < calibration_config.fact_max_gap / 2:
+        return True
+    return False
 
 
 def retrieve_references(
@@ -115,27 +253,129 @@ def cross_encode_rerank(
     return hybrid_rerank(query, prelim)
 
 
+def _selection_scores(retrieved: Sequence[Dict]) -> List[float]:
+    scores = [float(item.get("selection_score", item.get("score", 0.0))) for item in retrieved]
+    return _softmax(scores[: max(config.REFERENCE_TOP_N_MAX, 4)])
+
+
 def select_references_from_retrieved(
     retrieved: Sequence[Dict],
-    n: int = config.REFERENCE_TOP_N,
-    score_threshold: float | None = None,
+    profile: str | None = None,
+    calibration_config: ReferenceSelectionConfig | None = None,
+    n: int | None = None,
 ) -> List[str]:
     if not retrieved:
         return []
-    selected = []
-    for item in retrieved:
-        if score_threshold is None or item["score"] >= score_threshold:
-            selected.append(item["para_id"])
-        if len(selected) >= n:
-            break
-    if len(selected) < n:
-        for item in retrieved:
-            if item["para_id"] in selected:
-                continue
-            selected.append(item["para_id"])
-            if len(selected) >= n:
-                break
+    if not config.ENABLE_DYNAMIC_REF_SELECTION:
+        limit = n or config.REFERENCE_TOP_N
+        return [item["para_id"] for item in retrieved[:limit]]
+
+    calibration_config = calibration_config or ReferenceSelectionConfig()
+    profile = profile or ANSWER_PROFILE_FACT
+    limit = min(len(retrieved), n or calibration_config.max_refs)
+    probs = _selection_scores(retrieved[:limit])
+    selected = [retrieved[0]["para_id"]]
+    gap_limit = calibration_config.fact_max_gap if profile == ANSWER_PROFILE_FACT else calibration_config.aggregate_max_gap
+
+    if limit >= 2:
+        gap12 = probs[0] - probs[1]
+        if probs[1] >= calibration_config.top2_min and gap12 <= gap_limit:
+            selected.append(retrieved[1]["para_id"])
+    if limit >= 3 and profile in {ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS}:
+        gap23 = probs[1] - probs[2] if len(probs) > 2 else 1.0
+        if probs[2] >= calibration_config.top3_min and gap23 <= gap_limit:
+            selected.append(retrieved[2]["para_id"])
+    if limit >= 4 and profile == ANSWER_PROFILE_SYNTHESIS:
+        if probs[3] >= calibration_config.top3_min and probs[2] - probs[3] <= gap_limit:
+            selected.append(retrieved[3]["para_id"])
     return selected
+
+
+def sentence_split(text: str) -> List[str]:
+    chunks = re.split(r"(?<=[\.\?!…])\s+|\n+", (text or "").strip())
+    return [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
+
+
+def _dedupe_preserve_order(items: Iterable[str]) -> List[str]:
+    seen = set()
+    results = []
+    for item in items:
+        key = re.sub(r"\s+", " ", item).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        results.append(item)
+    return results
+
+
+def compress_evidence(
+    query: str,
+    paragraphs: Sequence[Mapping[str, str]],
+    profile: str,
+) -> List[Dict]:
+    paragraphs = [dict(item) for item in paragraphs if (item.get("text") or "").strip()]
+    if not paragraphs:
+        return []
+    if profile == ANSWER_PROFILE_LIST:
+        compressed = []
+        for paragraph in paragraphs:
+            text = paragraph.get("text", "").strip()
+            numbered = re.findall(r"(?:^|\s)(\d+\.\s*[^0-9\n]+(?:\s(?!\d+\.)[^0-9\n]+)*)", text)
+            if numbered:
+                text = "\n".join(item.strip() for item in numbered)
+            compressed.append({**paragraph, "text": text})
+        return compressed
+    if profile == ANSWER_PROFILE_SYNTHESIS:
+        compressed = []
+        for paragraph in paragraphs:
+            sentences = sentence_split(paragraph.get("text", ""))
+            ranked = sorted(
+                ((lexical_overlap_score(query, sentence), sentence) for sentence in sentences),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            selected = [sentence for _, sentence in ranked[:3]] or sentences[:3]
+            compressed.append({**paragraph, "text": " ".join(_dedupe_preserve_order(selected))})
+        return compressed
+
+    sentence_candidates: List[tuple[float, int, Dict]] = []
+    for para_rank, paragraph in enumerate(paragraphs):
+        for sent_rank, sentence in enumerate(sentence_split(paragraph.get("text", ""))):
+            score = lexical_overlap_score(query, sentence) + max(0.0, 0.15 - (0.05 * para_rank)) - (0.01 * sent_rank)
+            sentence_candidates.append(
+                (
+                    score,
+                    para_rank,
+                    {
+                        "para_id": paragraph["para_id"],
+                        "text": sentence,
+                    },
+                )
+            )
+    sentence_candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    selected = _dedupe_preserve_order(item[2]["text"] for item in sentence_candidates[:2])
+    if not selected:
+        return paragraphs[:1]
+    return [{"para_id": paragraphs[0]["para_id"], "text": " ".join(selected)}]
+
+
+def build_generation_context(
+    query: str,
+    reranked: Sequence[Dict],
+    selected_refs: Sequence[str],
+    profile: str,
+) -> List[Dict]:
+    selected_ref_set = set(selected_refs)
+    primary = [dict(item) for item in reranked if item.get("para_id") in selected_ref_set]
+    if not primary:
+        primary = [dict(item) for item in reranked[:1]]
+    if profile == ANSWER_PROFILE_FACT:
+        return compress_evidence(query, primary[:2], profile)
+    if profile == ANSWER_PROFILE_LIST:
+        extra = [dict(item) for item in reranked if item.get("para_id") not in selected_ref_set][:2]
+        return compress_evidence(query, primary + extra, profile)
+    extra = [dict(item) for item in reranked if item.get("para_id") not in selected_ref_set][:2]
+    return compress_evidence(query, primary + extra, profile)
 
 
 def compute_retrieval_metrics(

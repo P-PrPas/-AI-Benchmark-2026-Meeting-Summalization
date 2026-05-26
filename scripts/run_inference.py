@@ -14,18 +14,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from src import config
 from src.data_loader import load_dataset
 from src.embedder import Embedder, FAISSRetriever
-from src.retrieval import hybrid_rerank, select_references_from_retrieved
+from src.prompting import detect_answer_profile
+from src.reranker import load_reranker_if_available
+from src.retrieval import build_generation_context, rerank_retrieved, select_references_from_retrieved
 from src.generator import Generator
 import pandas as pd
 
 
-def predict_single(retriever, query, doc_id, generator=None, retrieval_top_k=10, reference_top_n=3):
+def predict_single(retriever, query, doc_id, generator=None, reranker=None, retrieval_top_k=10, reference_top_n=3):
     """Predict for a single query."""
-    retrieved = hybrid_rerank(query, retriever.retrieve(doc_id, query, top_k=retrieval_top_k))
+    retrieved = rerank_retrieved(
+        query,
+        retriever.retrieve(doc_id, query, top_k=retrieval_top_k),
+        reranker=reranker,
+        rerank_top_k=config.RERANK_TOP_K,
+    )
+    profile = detect_answer_profile(query, retrieved)
 
-    refs = select_references_from_retrieved(retrieved, n=reference_top_n)
+    refs = select_references_from_retrieved(retrieved, profile=profile, n=reference_top_n)
 
-    abstractive = generator.generate(query, retrieved) if generator else ""
+    generation_paragraphs = build_generation_context(query, retrieved, refs, profile)
+    abstractive = generator.generate(query, generation_paragraphs, profile=profile) if generator else ""
 
     return {
         "refs": refs,
@@ -39,6 +48,7 @@ def run_inference(
     retriever: FAISSRetriever,
     data_path: str,
     generator: Generator = None,
+    reranker=None,
     retrieval_top_k: int = 10,
     reference_top_n: int = 3,
     show_progress: bool = True
@@ -65,6 +75,7 @@ def run_inference(
             q["query"],
             q["doc_id"],
             generator=generator,
+            reranker=reranker,
             retrieval_top_k=retrieval_top_k,
             reference_top_n=reference_top_n
         )
@@ -129,6 +140,9 @@ def main():
 
     print("\n[3/4] Initializing retriever...")
     retriever = FAISSRetriever(embedder)
+    reranker = load_reranker_if_available()
+    if reranker is not None:
+        reranker.load_model()
 
     # Load and index data
     print("\n[4/4] Loading and indexing data...")
@@ -139,6 +153,7 @@ def main():
         retriever,
         data_path,
         generator=generator,
+        reranker=reranker,
         retrieval_top_k=args.retrieval_top_k,
         reference_top_n=args.reference_top_n
     )

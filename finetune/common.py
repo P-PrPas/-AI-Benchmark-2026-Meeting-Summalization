@@ -20,7 +20,7 @@ from src.prompting import (
     detect_answer_profile,
     format_ranked_context,
 )
-from src.retrieval import hybrid_rerank
+from src.retrieval import build_generation_context, rerank_retrieved, select_references_from_retrieved
 
 
 LANTA_PROJECT_ROOT = Path("/project/zz991000-zdeva/zz991011/CAMNET_P")
@@ -39,6 +39,7 @@ DEFAULT_OUTPUT_DIR = Path(
 DEFAULT_TRAIN_JSON_PATH = LANTA_PROJECT_ROOT / "data" / "train" / "train_set.json"
 DEFAULT_BASE_MODEL_PATH = LANTA_MODEL_ROOT / "typhoon2.5-qwen3-4b"
 DEFAULT_EMBED_MODEL_PATH = LANTA_MODEL_ROOT / "Qwen3-Embedding-8B"
+DEFAULT_RERANK_MODEL_PATH = LANTA_MODEL_ROOT / "Qwen3-Reranker-4B"
 
 
 def set_global_seed(seed: int) -> None:
@@ -360,6 +361,7 @@ def build_augmented_training_samples(
     doc_lookup: dict[str, dict[str, Any]],
     doc_embedding_index: dict[str, dict[str, Any]],
     embedder: Any,
+    reranker: Any | None = None,
     *,
     seed: int,
     oracle_fraction: float = 0.5,
@@ -383,7 +385,7 @@ def build_augmented_training_samples(
             embedder,
             config.RETRIEVAL_CANDIDATE_K,
         )
-        reranked = hybrid_rerank(sample["query"], retrieved)
+        reranked = rerank_retrieved(sample["query"], retrieved, reranker=reranker, rerank_top_k=config.RERANK_TOP_K)
         if not reranked:
             continue
         gold_refs = set(sample["gold_refs"])
@@ -399,13 +401,14 @@ def build_augmented_training_samples(
                 for paragraph in missing_gold
             ]
         profile = detect_answer_profile(sample["query"], reranked)
+        selected_refs = select_references_from_retrieved(reranked, profile=profile)
         noisy_candidates.append(
             {
                 **sample,
                 "ID": f"{sample['ID']}::noisy",
                 "context": build_ranked_context_from_paragraphs(
                     sample["query"],
-                    reranked[: context_limit_for_profile(profile)],
+                    build_generation_context(sample["query"], reranked, selected_refs, profile),
                     profile=profile,
                 ),
                 "mode": "noisy_retrieved",

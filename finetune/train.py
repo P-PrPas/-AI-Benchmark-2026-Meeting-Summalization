@@ -5,10 +5,12 @@ import gc
 import inspect
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
 from src import config as runtime_config
+from src.reranker import load_reranker_if_available
 
 from .common import (
     DEFAULT_ARTIFACT_NAME,
@@ -70,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-json-path")
     parser.add_argument("--model-name-or-path", default=str(DEFAULT_BASE_MODEL_PATH))
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
+    parser.add_argument("--rerank-model-name-or-path")
     parser.add_argument("--output-dir")
     parser.add_argument("--cache-dir", default=str(LANTA_CACHE_ROOT))
     parser.add_argument("--max-seq-len", type=int, default=runtime_config.GENERATOR_MAX_SEQ_LEN)
@@ -129,6 +132,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         project_root=project_root,
     )
     args.cache_dir = resolve_path(args.cache_dir, project_root=project_root)
+    args.rerank_model_name_or_path = args.rerank_model_name_or_path or os.environ.get("CAMNET_RERANK_MODEL_PATH")
     return args
 
 
@@ -136,6 +140,8 @@ def validate_args(args: argparse.Namespace) -> None:
     ensure_path_exists(args.train_json_path, "Train JSON")
     ensure_local_model_exists(args.model_name_or_path, "Base model", project_root=args.project_root)
     ensure_local_model_exists(args.embed_model_name_or_path, "Embed model", project_root=args.project_root)
+    if args.rerank_model_name_or_path:
+        ensure_local_model_exists(args.rerank_model_name_or_path, "Rerank model", project_root=args.project_root)
 
 
 def print_runtime_config(args: argparse.Namespace) -> None:
@@ -144,6 +150,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  train_json_path={args.train_json_path}")
     print(f"  model_name_or_path={resolve_model_source(args.model_name_or_path, args.project_root)}")
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
+    print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
     print(f"  artifact_name={DEFAULT_ARTIFACT_NAME}")
@@ -244,6 +251,9 @@ def main() -> None:
         device="cuda" if torch.cuda.is_available() else "cpu",
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
+    reranker = load_reranker_if_available(args.rerank_model_name_or_path)
+    if reranker is not None:
+        reranker.load_model()
     train_docs = [doc_lookup[doc_id] for doc_id in sorted(train_doc_ids)]
     train_doc_embedding_index = build_document_embedding_index(train_docs, embedder)
 
@@ -256,6 +266,7 @@ def main() -> None:
             doc_lookup,
             train_doc_embedding_index,
             embedder,
+            reranker=reranker,
             seed=args.seed,
             oracle_fraction=args.oracle_fraction,
             noisy_fraction=args.noisy_fraction,
@@ -306,6 +317,7 @@ def main() -> None:
             "output_dir": str(args.output_dir),
             "model_name_or_path": model_source,
             "embed_model_name_or_path": embed_source,
+            "rerank_model_name_or_path": args.rerank_model_name_or_path,
             "cache_dir": str(args.cache_dir),
         },
     )

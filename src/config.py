@@ -93,6 +93,17 @@ def _resolve_embed_model_path(default_name: str) -> Path:
     return MODEL_DIR / default_name
 
 
+def _resolve_rerank_model_path(default_name: str) -> Path:
+    """Resolve the reranker model path."""
+    env_value = os.environ.get("CAMNET_RERANK_MODEL_PATH")
+    if env_value:
+        candidate = Path(env_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = (PROJECT_ROOT / candidate).resolve()
+        return candidate
+    return MODEL_DIR / default_name
+
+
 BASE_DIR = PROJECT_ROOT
 DATA_DIR = _resolve_path("CAMNET_DATA_DIR", PROJECT_ROOT / "data")
 MODEL_DIR = _resolve_model_dir()
@@ -110,6 +121,7 @@ TEST_PATH = _resolve_path(
     _discover_test_path(),
 )
 EMBED_MODEL_PATH = _resolve_embed_model_path("Qwen3-Embedding-8B")
+RERANK_MODEL_PATH = _resolve_rerank_model_path("Qwen3-Reranker-4B")
 LLM_MODEL_PATH = _resolve_model_path("typhoon2.5-qwen3-4b")
 
 EVAL_SAMPLE_DIR = _resolve_path("CAMNET_EVAL_SAMPLE_DIR", DATA_DIR / "eval_sample")
@@ -130,7 +142,20 @@ STARTUP_SLEEP_SECONDS = int(os.environ.get("CAMNET_STARTUP_SLEEP_SECONDS", "10")
 
 RETRIEVAL_TOP_K = int(os.environ.get("CAMNET_RETRIEVAL_TOP_K", "12"))
 RETRIEVAL_CANDIDATE_K = int(os.environ.get("CAMNET_RETRIEVAL_CANDIDATE_K", str(RETRIEVAL_TOP_K)))
+RERANK_TOP_K = int(os.environ.get("CAMNET_RERANK_TOP_K", "20"))
 REFERENCE_TOP_N = int(os.environ.get("CAMNET_REFERENCE_TOP_N", "3"))
+REFERENCE_TOP_N_MAX = int(os.environ.get("CAMNET_REFERENCE_TOP_N_MAX", "4"))
+USE_RERANKER = os.environ.get("CAMNET_USE_RERANKER", "1").strip() not in {"0", "false", "False"}
+ENABLE_DYNAMIC_REF_SELECTION = os.environ.get("CAMNET_ENABLE_DYNAMIC_REF_SELECTION", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+ENABLE_QUERY_REFINEMENT = os.environ.get("CAMNET_ENABLE_QUERY_REFINEMENT", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
 GENERATOR_CONTEXT_K_FACT = int(os.environ.get("CAMNET_GENERATOR_CONTEXT_K_FACT", "3"))
 GENERATOR_CONTEXT_K_AGGREGATE = int(os.environ.get("CAMNET_GENERATOR_CONTEXT_K_AGGREGATE", "5"))
 GENERATOR_CONTEXT_K_SYNTHESIS = int(os.environ.get("CAMNET_GENERATOR_CONTEXT_K_SYNTHESIS", "6"))
@@ -146,3 +171,9 @@ STRICT_REPETITION_PENALTY = float(os.environ.get("CAMNET_STRICT_REPETITION_PENAL
 
 HYBRID_DENSE_WEIGHT = float(os.environ.get("CAMNET_HYBRID_DENSE_WEIGHT", "0.8"))
 HYBRID_LEXICAL_WEIGHT = float(os.environ.get("CAMNET_HYBRID_LEXICAL_WEIGHT", "0.2"))
+REF_SELECTION_TOP2_MIN = float(os.environ.get("CAMNET_REF_SELECTION_TOP2_MIN", "0.22"))
+REF_SELECTION_TOP3_MIN = float(os.environ.get("CAMNET_REF_SELECTION_TOP3_MIN", "0.16"))
+REF_SELECTION_FACT_MAX_GAP = float(os.environ.get("CAMNET_REF_SELECTION_FACT_MAX_GAP", "0.18"))
+REF_SELECTION_AGG_MAX_GAP = float(os.environ.get("CAMNET_REF_SELECTION_AGG_MAX_GAP", "0.24"))
+REF_SELECTION_LOW_CONFIDENCE = float(os.environ.get("CAMNET_REF_SELECTION_LOW_CONFIDENCE", "0.34"))
+QUERY_REFINEMENT_MAX_ENTROPY = float(os.environ.get("CAMNET_QUERY_REFINEMENT_MAX_ENTROPY", "0.92"))

@@ -6,7 +6,9 @@ import pandas as pd
 
 from .data_loader import load_dataset, get_document_paragraphs, get_queries, get_paragraph_by_id
 from .embedder import Embedder, FAISSRetriever
-from .retrieval import hybrid_rerank, select_references_from_retrieved
+from .prompting import detect_answer_profile
+from .reranker import load_reranker_if_available
+from .retrieval import build_generation_context, rerank_retrieved, select_references_from_retrieved
 from .generator import Generator
 from . import config
 
@@ -24,6 +26,9 @@ class SummarizationPipeline:
         self.embedder = embedder or Embedder()
         self.generator = generator or Generator()
         self.retriever = FAISSRetriever(self.embedder)
+        self.reranker = load_reranker_if_available()
+        if self.reranker is not None:
+            self.reranker.load_model()
         self.retrieval_top_k = retrieval_top_k
         self.reference_top_n = reference_top_n
 
@@ -46,14 +51,16 @@ class SummarizationPipeline:
         Returns:
             Dict with keys: ID, query, doc_id, abstractive, refs
         """
-        retrieved = hybrid_rerank(
+        retrieved = rerank_retrieved(
             query,
             self.retriever.retrieve(doc_id, query, self.retrieval_top_k),
+            reranker=self.reranker,
+            rerank_top_k=config.RERANK_TOP_K,
         )
-
-        top_refs = select_references_from_retrieved(retrieved, n=self.reference_top_n)
-
-        abstractive = self.generator.generate(query, retrieved)
+        profile = detect_answer_profile(query, retrieved)
+        top_refs = select_references_from_retrieved(retrieved, profile=profile, n=self.reference_top_n)
+        generation_paragraphs = build_generation_context(query, retrieved, top_refs, profile)
+        abstractive = self.generator.generate(query, generation_paragraphs, profile=profile)
 
         return {
             "query": query,

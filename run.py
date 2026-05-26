@@ -20,7 +20,16 @@ from tqdm import tqdm
 
 from src import config
 from src.generator import Generator
-from src.retrieval import hybrid_rerank, select_references_from_retrieved, tokenize_for_overlap
+from src.prompting import detect_answer_profile
+from src.reranker import load_reranker_if_available
+from src.retrieval import (
+    build_generation_context,
+    needs_query_refinement,
+    rerank_retrieved,
+    rewrite_query_heuristic,
+    select_references_from_retrieved,
+    tokenize_for_overlap,
+)
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -41,6 +50,7 @@ def log_runtime_context():
     print(f"      TEST_PATH={TEST_PATH}")
     print(f"      RESULT_PATH={RESULT_PATH}")
     print(f"      EMBED_MODEL_PATH={config.EMBED_MODEL_PATH}")
+    print(f"      RERANK_MODEL_PATH={config.RERANK_MODEL_PATH}")
     print(f"      LLM_MODEL_PATH={config.LLM_MODEL_PATH}")
     print(f"      RETRIEVAL_CANDIDATE_K={config.RETRIEVAL_CANDIDATE_K}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
@@ -182,6 +192,22 @@ def load_generator() -> Generator:
     return generator
 
 
+def load_reranker():
+    print(f"[3/4] Loading reranker from {config.RERANK_MODEL_PATH} ...")
+    reranker = load_reranker_if_available()
+    if reranker is None:
+        print("      [warn] Reranker unavailable, falling back to hybrid reranking only")
+        return None
+    try:
+        reranker.load_model()
+        print("      Reranker loaded successfully")
+        return reranker
+    except Exception as exc:
+        print(f"      [warn] Failed to load reranker: {exc}")
+        print("      [warn] Falling back to hybrid reranking only")
+        return None
+
+
 def main():
     os.makedirs(RESULT_DIR, exist_ok=True)
     log_runtime_context()
@@ -198,6 +224,7 @@ def main():
 
     embedder = load_embedder()
     generator = load_generator()
+    reranker = load_reranker()
 
     print("[3/4] Indexing documents ...")
     faiss_indices = {}
@@ -228,18 +255,40 @@ def main():
             except Exception as exc:
                 print(f"      [warn] Failed to encode query {query_id}: {exc}")
 
-        retrieved = retrieve(
+        dense_retrieved = retrieve(
             faiss_indices.get(doc_id),
             paragraphs,
             query_emb,
             query,
             config.RETRIEVAL_CANDIDATE_K,
         )
-        reranked = hybrid_rerank(query, retrieved)
-        refs = select_references_from_retrieved(reranked, n=config.REFERENCE_TOP_N)
+        initial_profile = detect_answer_profile(query, dense_retrieved)
+        reranked = rerank_retrieved(query, dense_retrieved, reranker=reranker, rerank_top_k=config.RERANK_TOP_K)
+        if needs_query_refinement(reranked, initial_profile):
+            refined_query = rewrite_query_heuristic(query)
+            if refined_query != query:
+                refined_dense = retrieve(
+                    faiss_indices.get(doc_id),
+                    paragraphs,
+                    encode(embedder, [refined_query])[0] if embedder is not None else None,
+                    refined_query,
+                    config.RETRIEVAL_CANDIDATE_K,
+                )
+                refined_reranked = rerank_retrieved(
+                    refined_query,
+                    refined_dense,
+                    reranker=reranker,
+                    rerank_top_k=config.RERANK_TOP_K,
+                )
+                if refined_reranked:
+                    reranked = refined_reranked
+        profile = detect_answer_profile(query, reranked)
+        refs = select_references_from_retrieved(reranked, profile=profile)
+        generation_paragraphs = build_generation_context(query, reranked, refs, profile)
         abstractive = generator.generate(
             query,
-            reranked,
+            generation_paragraphs,
+            profile=profile,
             max_seq_len=config.GENERATOR_MAX_SEQ_LEN,
         )
 

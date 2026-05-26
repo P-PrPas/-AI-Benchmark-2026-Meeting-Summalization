@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from src import config as runtime_config
 from src.generator import Generator
-from src.retrieval import compute_retrieval_metrics, hybrid_rerank, select_references_from_retrieved
+from src.prompting import detect_answer_profile
+from src.reranker import load_reranker_if_available
+from src.retrieval import (
+    build_generation_context,
+    compute_retrieval_metrics,
+    needs_query_refinement,
+    rerank_retrieved,
+    rewrite_query_heuristic,
+    select_references_from_retrieved,
+)
 from .common import (
     DEFAULT_ARTIFACT_NAME,
     DEFAULT_BASE_MODEL_PATH,
@@ -44,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name-or-path")
     parser.add_argument("--adapter-path")
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
+    parser.add_argument("--rerank-model-name-or-path")
     parser.add_argument("--output-dir")
     parser.add_argument("--cache-dir", default=str(LANTA_CACHE_ROOT))
     parser.add_argument("--max-seq-len", type=int, default=runtime_config.GENERATOR_MAX_SEQ_LEN)
@@ -66,6 +77,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     )
     args.cache_dir = resolve_path(args.cache_dir, project_root=project_root)
     args.model_name_or_path = args.model_name_or_path or str(args.output_dir / "final_merged")
+    args.rerank_model_name_or_path = args.rerank_model_name_or_path or os.environ.get("CAMNET_RERANK_MODEL_PATH")
     args.adapter_path = (
         resolve_path(args.adapter_path, project_root=project_root)
         if args.adapter_path
@@ -90,6 +102,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  model_name_or_path={resolve_model_source(args.model_name_or_path, args.project_root)}")
     print(f"  adapter_path={args.adapter_path}")
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
+    print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
 
@@ -173,6 +186,9 @@ def main() -> None:
         device="cuda" if torch.cuda.is_available() else "cpu",
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
+    reranker = load_reranker_if_available(args.rerank_model_name_or_path)
+    if reranker is not None:
+        reranker.load_model()
 
     doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
@@ -184,6 +200,7 @@ def main() -> None:
     gold_rows = []
     reranked_retrievals = []
     predicted_profiles = {}
+    retrieval_diagnostics = []
     for sample in val_raw_samples:
         dense_retrieved = retrieve_paragraphs(
             doc_embedding_index,
@@ -192,14 +209,49 @@ def main() -> None:
             embedder,
             args.retrieval_top_k,
         )
-        retrieved = hybrid_rerank(sample["query"], dense_retrieved)
+        predicted_profile = detect_answer_profile(sample["query"], dense_retrieved)
+        retrieved = rerank_retrieved(
+            sample["query"],
+            dense_retrieved,
+            reranker=reranker,
+            rerank_top_k=runtime_config.RERANK_TOP_K,
+        )
+        if needs_query_refinement(retrieved, predicted_profile):
+            refined_query = rewrite_query_heuristic(sample["query"])
+            if refined_query != sample["query"]:
+                refined_dense = retrieve_paragraphs(
+                    doc_embedding_index,
+                    sample["doc_id"],
+                    refined_query,
+                    embedder,
+                    args.retrieval_top_k,
+                )
+                refined_retrieved = rerank_retrieved(
+                    refined_query,
+                    refined_dense,
+                    reranker=reranker,
+                    rerank_top_k=runtime_config.RERANK_TOP_K,
+                )
+                if refined_retrieved:
+                    retrieved = refined_retrieved
         reranked_retrievals.append(retrieved)
         predicted_profile = generator.detect_profile(sample["query"], retrieved)
         predicted_profiles[sample["ID"]] = predicted_profile
-        predicted_refs = select_references_from_retrieved(retrieved, n=args.reference_top_n)
-        predicted_answer = generator.generate(
+        predicted_refs = select_references_from_retrieved(
+            retrieved,
+            profile=predicted_profile,
+            n=args.reference_top_n,
+        )
+        generation_paragraphs = build_generation_context(
             sample["query"],
             retrieved,
+            predicted_refs,
+            predicted_profile,
+        )
+        predicted_answer = generator.generate(
+            sample["query"],
+            generation_paragraphs,
+            profile=predicted_profile,
             max_seq_len=args.max_seq_len,
         )
         prediction_rows.append(
@@ -208,6 +260,23 @@ def main() -> None:
                 "abstractive": predicted_answer,
                 "refs": ",".join(predicted_refs),
                 "profile": predicted_profile,
+            }
+        )
+        retrieval_diagnostics.append(
+            {
+                "ID": sample["ID"],
+                "profile": predicted_profile,
+                "predicted_refs": predicted_refs,
+                "top_candidates": [
+                    {
+                        "para_id": item["para_id"],
+                        "score": float(item.get("score", 0.0)),
+                        "dense_score": float(item.get("dense_score", 0.0)),
+                        "lexical_score": float(item.get("lexical_score", 0.0)),
+                        "rerank_score": float(item.get("rerank_score", item.get("score", 0.0))),
+                    }
+                    for item in retrieved[:5]
+                ],
             }
         )
         gold_rows.append(
@@ -240,6 +309,7 @@ def main() -> None:
     metrics["pred_answer_length_mean"] = float(pd.Series(answer_lengths).mean()) if answer_lengths else 0.0
     metrics["format_error_rate"] = len(malformed) / max(1, len(prediction_rows))
     save_json(args.output_dir / "validation_metrics.json", metrics)
+    save_json(args.output_dir / "retrieval_diagnostics.json", {"rows": retrieval_diagnostics})
 
     failure_rows = []
     pred_lookup = {row["ID"]: row for row in prediction_rows}
