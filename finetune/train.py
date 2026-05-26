@@ -299,6 +299,16 @@ def main() -> None:
     save_json(args.output_dir / "missing_train_refs.json", {"rows": train_missing_refs})
     save_json(args.output_dir / "missing_val_refs.json", {"rows": val_missing_refs})
     save_json(args.output_dir / "training_mix_counts.json", augmentation_counts)
+    save_json(
+        args.output_dir / "runtime_paths.json",
+        {
+            "project_root": str(args.project_root),
+            "output_dir": str(args.output_dir),
+            "model_name_or_path": model_source,
+            "embed_model_name_or_path": embed_source,
+            "cache_dir": str(args.cache_dir),
+        },
+    )
 
     print(f"Loaded docs={len(docs)} queries={len(queries)}")
     print(f"Train docs={len(train_doc_ids)} val docs={len(val_doc_ids)}")

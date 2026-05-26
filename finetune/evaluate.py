@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate finetuned typhoon2.5-qwen3-4b on held-out validation")
     parser.add_argument("--project-root", default=str(LANTA_PROJECT_ROOT))
     parser.add_argument("--train-json-path")
-    parser.add_argument("--model-name-or-path", default=str(DEFAULT_OUTPUT_DIR / "final_merged"))
+    parser.add_argument("--model-name-or-path")
     parser.add_argument("--adapter-path")
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
     parser.add_argument("--output-dir")
@@ -65,6 +65,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         project_root=project_root,
     )
     args.cache_dir = resolve_path(args.cache_dir, project_root=project_root)
+    args.model_name_or_path = args.model_name_or_path or str(args.output_dir / "final_merged")
     args.adapter_path = (
         resolve_path(args.adapter_path, project_root=project_root)
         if args.adapter_path

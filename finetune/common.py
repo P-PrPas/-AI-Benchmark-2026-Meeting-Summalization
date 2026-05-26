@@ -29,8 +29,13 @@ LANTA_MODEL_ROOT = Path(
 ).expanduser()
 LANTA_CACHE_ROOT = Path("/project/zz991000-zdeva/zz991011/.cache")
 
-DEFAULT_ARTIFACT_NAME = "typhoon25_qwen3_4b_rag_qa_qlora"
-DEFAULT_OUTPUT_DIR = LANTA_PROJECT_ROOT / "artifacts" / DEFAULT_ARTIFACT_NAME
+DEFAULT_ARTIFACT_NAME = os.environ.get("CAMNET_FINETUNE_ARTIFACT_NAME", "typhoon25_qwen3_4b_rag_qa_qlora")
+DEFAULT_OUTPUT_DIR = Path(
+    os.environ.get(
+        "CAMNET_FINETUNE_OUTPUT_DIR",
+        str(LANTA_PROJECT_ROOT / "artifacts" / DEFAULT_ARTIFACT_NAME),
+    )
+).expanduser()
 DEFAULT_TRAIN_JSON_PATH = LANTA_PROJECT_ROOT / "data" / "train" / "train_set.json"
 DEFAULT_BASE_MODEL_PATH = LANTA_MODEL_ROOT / "typhoon2.5-qwen3-4b"
 DEFAULT_EMBED_MODEL_PATH = LANTA_MODEL_ROOT / "Qwen3-Embedding-8B"
