@@ -40,7 +40,7 @@ conda run -n "$CONDA_ENV_NAME" python -u -m finetune.train \
   --project-root "$REPO_ROOT" \
   --train-json-path "$REPO_ROOT/data/train/train_set.json" \
   --model-name-or-path "$MODEL_ROOT/typhoon2.5-qwen3-4b" \
-  --embed-model-name-or-path "$MODEL_ROOT/bge-m3" \
+  --embed-model-name-or-path "$MODEL_ROOT/Qwen3-Embedding-8B" \
   --output-dir "$OUTPUT_DIR" \
   --cache-dir "$CACHE_ROOT" \
   --num-train-epochs "$NUM_TRAIN_EPOCHS" \

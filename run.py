@@ -40,7 +40,7 @@ def log_runtime_context():
     print("[info] Runtime configuration")
     print(f"      TEST_PATH={TEST_PATH}")
     print(f"      RESULT_PATH={RESULT_PATH}")
-    print(f"      BGE_MODEL_PATH={config.BGE_MODEL_PATH}")
+    print(f"      EMBED_MODEL_PATH={config.EMBED_MODEL_PATH}")
     print(f"      LLM_MODEL_PATH={config.LLM_MODEL_PATH}")
     print(f"      RETRIEVAL_CANDIDATE_K={config.RETRIEVAL_CANDIDATE_K}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
@@ -108,14 +108,14 @@ def build_doc_index(data: dict) -> Dict[str, List[Dict]]:
 
 
 def load_embedder():
-    print(f"[2/4] Loading BGE-M3 embedder from {config.BGE_MODEL_PATH} ...")
+    print(f"[2/4] Loading embedding model from {config.EMBED_MODEL_PATH} ...")
     try:
         import torch
         from sentence_transformers import SentenceTransformer
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = SentenceTransformer(
-            str(config.BGE_MODEL_PATH),
+            str(config.EMBED_MODEL_PATH),
             device=device,
             local_files_only=True,
         )

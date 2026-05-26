@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CAMNET_MODEL_DIR=/model/weights \
-    CAMNET_BGE_MODEL_PATH=/model/weights/bge-m3 \
+    CAMNET_EMBED_MODEL_PATH=/model/weights/Qwen3-Embedding-8B \
     CAMNET_LLM_MODEL_NAME=${CAMNET_LLM_MODEL_NAME} \
     CAMNET_TEST_PATH=/model/test/test_set.json \
     CAMNET_OUTPUT_DIR=/result \
@@ -34,7 +34,7 @@ RUN python3 -m pip install --no-cache-dir --force-reinstall \
 
 RUN mkdir -p /model/weights /model/test /result
 COPY weight/ /model/weights/
-RUN test -d /model/weights/bge-m3
+RUN test -d /model/weights/Qwen3-Embedding-8B
 RUN test -d "/model/weights/${CAMNET_LLM_MODEL_NAME}"
 
 COPY run.py /model/run.py

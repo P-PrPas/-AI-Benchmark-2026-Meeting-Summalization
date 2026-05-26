@@ -6,18 +6,18 @@ from typing import List, Dict, Tuple
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from config import BGE_MODEL_PATH
+from config import EMBED_MODEL_PATH
 
 
 class Embedder:
-    """BGE-M3 embedding wrapper for paragraph and query encoding."""
+    """Embedding wrapper for paragraph and query encoding."""
 
     def __init__(self, model_path: str = None):
         if model_path is None:
-            model_path = BGE_MODEL_PATH
+            model_path = EMBED_MODEL_PATH
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Loading BGE-M3 model from {model_path}...")
+        print(f"Loading embedding model from {model_path}...")
         self.model = SentenceTransformer(
             str(model_path),
             device=self.device,

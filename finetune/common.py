@@ -33,7 +33,7 @@ DEFAULT_ARTIFACT_NAME = "typhoon25_qwen3_4b_rag_qa_qlora"
 DEFAULT_OUTPUT_DIR = LANTA_PROJECT_ROOT / "artifacts" / DEFAULT_ARTIFACT_NAME
 DEFAULT_TRAIN_JSON_PATH = LANTA_PROJECT_ROOT / "data" / "train" / "train_set.json"
 DEFAULT_BASE_MODEL_PATH = LANTA_MODEL_ROOT / "typhoon2.5-qwen3-4b"
-DEFAULT_EMBED_MODEL_PATH = LANTA_MODEL_ROOT / "bge-m3"
+DEFAULT_EMBED_MODEL_PATH = LANTA_MODEL_ROOT / "Qwen3-Embedding-8B"
 
 
 def set_global_seed(seed: int) -> None:

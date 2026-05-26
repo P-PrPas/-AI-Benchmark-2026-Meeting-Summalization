@@ -82,6 +82,17 @@ def _resolve_model_path(default_name: str) -> Path:
     return model_dir / default_name
 
 
+def _resolve_embed_model_path(default_name: str) -> Path:
+    """Resolve the embedding model path."""
+    env_value = os.environ.get("CAMNET_EMBED_MODEL_PATH")
+    if env_value:
+        candidate = Path(env_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = (PROJECT_ROOT / candidate).resolve()
+        return candidate
+    return MODEL_DIR / default_name
+
+
 BASE_DIR = PROJECT_ROOT
 DATA_DIR = _resolve_path("CAMNET_DATA_DIR", PROJECT_ROOT / "data")
 MODEL_DIR = _resolve_model_dir()
@@ -98,7 +109,7 @@ TEST_PATH = _resolve_path(
     "CAMNET_TEST_PATH",
     _discover_test_path(),
 )
-BGE_MODEL_PATH = _resolve_path("CAMNET_BGE_MODEL_PATH", MODEL_DIR / "bge-m3")
+EMBED_MODEL_PATH = _resolve_embed_model_path("Qwen3-Embedding-8B")
 LLM_MODEL_PATH = _resolve_model_path("typhoon2.5-qwen3-4b")
 
 EVAL_SAMPLE_DIR = _resolve_path("CAMNET_EVAL_SAMPLE_DIR", DATA_DIR / "eval_sample")

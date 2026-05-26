@@ -73,7 +73,7 @@ def run_evaluation(sol: pd.DataFrame, pred: pd.DataFrame, merge='ID'):
 
 
     # calculate SS-score
-    model = SentenceTransformer(str(BASE_DIR / "weight" / "bge-m3"))
+    model = SentenceTransformer(str(BASE_DIR / "weight" / "Qwen3-Embedding-8B"))
     texts = df[f'abstractive_sol'].tolist() + df[f'abstractive_pred'].tolist()
     
     embeddings = model.encode(texts,batch_size=32,
