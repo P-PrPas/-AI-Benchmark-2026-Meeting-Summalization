@@ -42,15 +42,22 @@ class NeuralReranker:
             trust_remote_code=True,
             local_files_only=True,
         )
+        if self.tokenizer.pad_token is None:
+            fallback_pad = self.tokenizer.eos_token or self.tokenizer.unk_token
+            if fallback_pad is not None:
+                self.tokenizer.pad_token = fallback_pad
+        self.tokenizer.padding_side = "right"
         self.model = AutoModelForSequenceClassification.from_pretrained(
             str(model_path),
             trust_remote_code=True,
             local_files_only=True,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else (
+            dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else (
                 torch.float16 if torch.cuda.is_available() else torch.float32
             ),
             device_map="auto" if torch.cuda.is_available() else None,
         )
+        if getattr(self.model.config, "pad_token_id", None) is None and self.tokenizer.pad_token_id is not None:
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.eval()
 
     @property
@@ -65,8 +72,9 @@ class NeuralReranker:
         assert self.model is not None and self.tokenizer is not None
 
         results: List[float] = []
-        for start in range(0, len(pairs), self.batch_size):
-            batch = pairs[start:start + self.batch_size]
+        effective_batch_size = self.batch_size if self.tokenizer.pad_token_id is not None else 1
+        for start in range(0, len(pairs), effective_batch_size):
+            batch = pairs[start:start + effective_batch_size]
             queries = [item[0] for item in batch]
             passages = [item[1] for item in batch]
             encoded = self.tokenizer(
