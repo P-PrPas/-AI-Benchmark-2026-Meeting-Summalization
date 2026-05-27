@@ -20,7 +20,12 @@ from src.prompting import (
     detect_answer_profile,
     format_ranked_context,
 )
-from src.retrieval import build_generation_context, rerank_retrieved, select_references_from_retrieved
+from src.retrieval import (
+    build_generation_context,
+    rerank_retrieved,
+    retrieval_candidate_count,
+    select_references_from_retrieved,
+)
 
 
 LANTA_PROJECT_ROOT = Path("/project/zz991000-zdeva/zz991011/CAMNET_P")
@@ -383,7 +388,7 @@ def build_augmented_training_samples(
             sample["doc_id"],
             sample["query"],
             embedder,
-            config.RETRIEVAL_CANDIDATE_K,
+            retrieval_candidate_count(),
         )
         reranked = rerank_retrieved(sample["query"], retrieved, reranker=reranker, rerank_top_k=config.RERANK_TOP_K)
         if not reranked:

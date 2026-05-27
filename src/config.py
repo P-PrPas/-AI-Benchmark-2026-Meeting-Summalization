@@ -145,17 +145,26 @@ RETRIEVAL_CANDIDATE_K = int(os.environ.get("CAMNET_RETRIEVAL_CANDIDATE_K", str(R
 RERANK_TOP_K = int(os.environ.get("CAMNET_RERANK_TOP_K", "20"))
 REFERENCE_TOP_N = int(os.environ.get("CAMNET_REFERENCE_TOP_N", "3"))
 REFERENCE_TOP_N_MAX = int(os.environ.get("CAMNET_REFERENCE_TOP_N_MAX", "4"))
-USE_RERANKER = os.environ.get("CAMNET_USE_RERANKER", "1").strip() not in {"0", "false", "False"}
-ENABLE_DYNAMIC_REF_SELECTION = os.environ.get("CAMNET_ENABLE_DYNAMIC_REF_SELECTION", "1").strip() not in {
+USE_RERANKER = os.environ.get("CAMNET_USE_RERANKER", "0").strip() not in {"0", "false", "False"}
+ENABLE_DYNAMIC_REF_SELECTION = os.environ.get("CAMNET_ENABLE_DYNAMIC_REF_SELECTION", "0").strip() not in {
     "0",
     "false",
     "False",
 }
-ENABLE_QUERY_REFINEMENT = os.environ.get("CAMNET_ENABLE_QUERY_REFINEMENT", "1").strip() not in {
+ENABLE_QUERY_REFINEMENT = os.environ.get("CAMNET_ENABLE_QUERY_REFINEMENT", "0").strip() not in {
     "0",
     "false",
     "False",
 }
+ENABLE_EVIDENCE_COMPRESSION = os.environ.get("CAMNET_ENABLE_EVIDENCE_COMPRESSION", "0").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+RERANK_INSTRUCTION = os.environ.get(
+    "CAMNET_RERANK_INSTRUCTION",
+    "Given a web search query, retrieve relevant passages that answer the query",
+)
 GENERATOR_CONTEXT_K_FACT = int(os.environ.get("CAMNET_GENERATOR_CONTEXT_K_FACT", "3"))
 GENERATOR_CONTEXT_K_AGGREGATE = int(os.environ.get("CAMNET_GENERATOR_CONTEXT_K_AGGREGATE", "5"))
 GENERATOR_CONTEXT_K_SYNTHESIS = int(os.environ.get("CAMNET_GENERATOR_CONTEXT_K_SYNTHESIS", "6"))

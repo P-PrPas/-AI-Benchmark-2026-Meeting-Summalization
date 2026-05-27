@@ -48,6 +48,15 @@ class ReferenceSelectionConfig:
     max_entropy: float = config.QUERY_REFINEMENT_MAX_ENTROPY
 
 
+def retrieval_candidate_count(*, use_reranker: bool | None = None) -> int:
+    if use_reranker is None:
+        use_reranker = config.USE_RERANKER
+    top_k = config.RETRIEVAL_CANDIDATE_K
+    if use_reranker:
+        top_k = max(top_k, config.RERANK_TOP_K)
+    return top_k
+
+
 def tokenize_for_overlap(text: str) -> List[str]:
     return re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
 
@@ -263,10 +272,14 @@ def select_references_from_retrieved(
     profile: str | None = None,
     calibration_config: ReferenceSelectionConfig | None = None,
     n: int | None = None,
+    mode: str | None = None,
 ) -> List[str]:
     if not retrieved:
         return []
-    if not config.ENABLE_DYNAMIC_REF_SELECTION:
+    mode = (mode or ("dynamic" if config.ENABLE_DYNAMIC_REF_SELECTION else "fixed")).lower()
+    if mode not in {"fixed", "dynamic"}:
+        raise ValueError(f"Unsupported reference selection mode: {mode}")
+    if mode == "fixed":
         limit = n or config.REFERENCE_TOP_N
         return [item["para_id"] for item in retrieved[:limit]]
 
@@ -369,13 +382,19 @@ def build_generation_context(
     primary = [dict(item) for item in reranked if item.get("para_id") in selected_ref_set]
     if not primary:
         primary = [dict(item) for item in reranked[:1]]
+
     if profile == ANSWER_PROFILE_FACT:
-        return compress_evidence(query, primary[:2], profile)
-    if profile == ANSWER_PROFILE_LIST:
+        paragraphs = primary[:2]
+    elif profile == ANSWER_PROFILE_LIST:
         extra = [dict(item) for item in reranked if item.get("para_id") not in selected_ref_set][:2]
-        return compress_evidence(query, primary + extra, profile)
-    extra = [dict(item) for item in reranked if item.get("para_id") not in selected_ref_set][:2]
-    return compress_evidence(query, primary + extra, profile)
+        paragraphs = primary + extra
+    else:
+        extra = [dict(item) for item in reranked if item.get("para_id") not in selected_ref_set][:2]
+        paragraphs = primary + extra
+
+    if not config.ENABLE_EVIDENCE_COMPRESSION:
+        return paragraphs
+    return compress_evidence(query, paragraphs, profile)
 
 
 def compute_retrieval_metrics(
@@ -383,29 +402,66 @@ def compute_retrieval_metrics(
     retrieved_list: Sequence[Sequence[Dict]],
 ) -> Dict[str, float]:
     total = max(1, len(gold_refs_list))
-    hit1 = hit3 = hit10 = 0
+    hit1 = hit3 = hit10 = hit20 = 0
     recall10 = []
+    recall20 = []
     iou3 = []
     for gold_refs, retrieved in zip(gold_refs_list, retrieved_list):
         gold_set = set(gold_refs or [])
         top1 = {item["para_id"] for item in retrieved[:1]}
         top3 = {item["para_id"] for item in retrieved[:3]}
         top10 = {item["para_id"] for item in retrieved[:10]}
+        top20 = {item["para_id"] for item in retrieved[:20]}
         if gold_set & top1:
             hit1 += 1
         if gold_set & top3:
             hit3 += 1
         if gold_set & top10:
             hit10 += 1
+        if gold_set & top20:
+            hit20 += 1
         if gold_set:
             recall10.append(len(gold_set & top10) / len(gold_set))
+            recall20.append(len(gold_set & top20) / len(gold_set))
             iou3.append(len(gold_set & top3) / len(gold_set | top3) if (gold_set | top3) else 0.0)
     return {
         "hit_any_gold_at_1": hit1 / total,
         "hit_any_gold_at_3": hit3 / total,
         "hit_any_gold_at_10": hit10 / total,
+        "hit_any_gold_at_20": hit20 / total,
         "mean_ref_recall_at_10": float(np.mean(recall10)) if recall10 else 0.0,
+        "mean_ref_recall_at_20": float(np.mean(recall20)) if recall20 else 0.0,
         "mean_iou_top_3": float(np.mean(iou3)) if iou3 else 0.0,
+    }
+
+
+def compute_selected_reference_metrics(
+    gold_refs_list: Sequence[Sequence[str]],
+    predicted_refs_list: Sequence[Sequence[str]],
+) -> Dict[str, float]:
+    total = max(1, len(gold_refs_list))
+    iou_scores = []
+    pred_counts = []
+    count_1 = count_2 = count_3_plus = 0
+    for gold_refs, predicted_refs in zip(gold_refs_list, predicted_refs_list):
+        gold_set = set(gold_refs or [])
+        pred_set = set(predicted_refs or [])
+        union = gold_set | pred_set
+        iou_scores.append(len(gold_set & pred_set) / len(union) if union else 0.0)
+        pred_count = len(pred_set)
+        pred_counts.append(pred_count)
+        if pred_count <= 1:
+            count_1 += 1
+        elif pred_count == 2:
+            count_2 += 1
+        else:
+            count_3_plus += 1
+    return {
+        "selected_ref_iou": float(np.mean(iou_scores)) if iou_scores else 0.0,
+        "pred_ref_count_mean": float(np.mean(pred_counts)) if pred_counts else 0.0,
+        "pred_ref_count_pct_1": count_1 / total,
+        "pred_ref_count_pct_2": count_2 / total,
+        "pred_ref_count_pct_3_plus": count_3_plus / total,
     }
 
 

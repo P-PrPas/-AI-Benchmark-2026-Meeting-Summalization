@@ -26,6 +26,7 @@ from src.retrieval import (
     build_generation_context,
     needs_query_refinement,
     rerank_retrieved,
+    retrieval_candidate_count,
     rewrite_query_heuristic,
     select_references_from_retrieved,
     tokenize_for_overlap,
@@ -53,6 +54,11 @@ def log_runtime_context():
     print(f"      RERANK_MODEL_PATH={config.RERANK_MODEL_PATH}")
     print(f"      LLM_MODEL_PATH={config.LLM_MODEL_PATH}")
     print(f"      RETRIEVAL_CANDIDATE_K={config.RETRIEVAL_CANDIDATE_K}")
+    print(f"      EFFECTIVE_RETRIEVAL_CANDIDATE_K={retrieval_candidate_count()}")
+    print(f"      USE_RERANKER={config.USE_RERANKER}")
+    print(f"      ENABLE_DYNAMIC_REF_SELECTION={config.ENABLE_DYNAMIC_REF_SELECTION}")
+    print(f"      ENABLE_QUERY_REFINEMENT={config.ENABLE_QUERY_REFINEMENT}")
+    print(f"      ENABLE_EVIDENCE_COMPRESSION={config.ENABLE_EVIDENCE_COMPRESSION}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
 
 
@@ -242,6 +248,7 @@ def main():
 
     print(f"[4/4] Running inference on {total} queries ...")
     rows = []
+    effective_retrieval_top_k = retrieval_candidate_count(use_reranker=reranker is not None)
     for i, query_row in enumerate(tqdm(queries, desc="Predicting"), start=1):
         query_id = query_row["ID"]
         doc_id = query_row["doc_id"]
@@ -260,7 +267,7 @@ def main():
             paragraphs,
             query_emb,
             query,
-            config.RETRIEVAL_CANDIDATE_K,
+            effective_retrieval_top_k,
         )
         initial_profile = detect_answer_profile(query, dense_retrieved)
         reranked = rerank_retrieved(query, dense_retrieved, reranker=reranker, rerank_top_k=config.RERANK_TOP_K)
@@ -272,7 +279,7 @@ def main():
                     paragraphs,
                     encode(embedder, [refined_query])[0] if embedder is not None else None,
                     refined_query,
-                    config.RETRIEVAL_CANDIDATE_K,
+                    effective_retrieval_top_k,
                 )
                 refined_reranked = rerank_retrieved(
                     refined_query,

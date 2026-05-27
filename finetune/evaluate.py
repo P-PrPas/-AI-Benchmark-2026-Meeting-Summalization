@@ -10,6 +10,7 @@ from src.prompting import detect_answer_profile
 from src.reranker import load_reranker_if_available
 from src.retrieval import (
     build_generation_context,
+    compute_selected_reference_metrics,
     compute_retrieval_metrics,
     needs_query_refinement,
     rerank_retrieved,
@@ -103,6 +104,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  adapter_path={args.adapter_path}")
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
     print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
+    print(f"  use_reranker={runtime_config.USE_RERANKER}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
 
@@ -198,17 +200,24 @@ def main() -> None:
 
     prediction_rows = []
     gold_rows = []
+    dense_retrievals = []
     reranked_retrievals = []
+    predicted_refs_list = []
     predicted_profiles = {}
     retrieval_diagnostics = []
+    effective_retrieval_top_k = max(
+        args.retrieval_top_k,
+        runtime_config.RERANK_TOP_K if reranker is not None else 0,
+    )
     for sample in val_raw_samples:
         dense_retrieved = retrieve_paragraphs(
             doc_embedding_index,
             sample["doc_id"],
             sample["query"],
             embedder,
-            args.retrieval_top_k,
+            effective_retrieval_top_k,
         )
+        dense_retrievals.append(dense_retrieved)
         predicted_profile = detect_answer_profile(sample["query"], dense_retrieved)
         retrieved = rerank_retrieved(
             sample["query"],
@@ -224,7 +233,7 @@ def main() -> None:
                     sample["doc_id"],
                     refined_query,
                     embedder,
-                    args.retrieval_top_k,
+                    effective_retrieval_top_k,
                 )
                 refined_retrieved = rerank_retrieved(
                     refined_query,
@@ -242,6 +251,7 @@ def main() -> None:
             profile=predicted_profile,
             n=args.reference_top_n,
         )
+        predicted_refs_list.append(predicted_refs)
         generation_paragraphs = build_generation_context(
             sample["query"],
             retrieved,
@@ -267,6 +277,13 @@ def main() -> None:
                 "ID": sample["ID"],
                 "profile": predicted_profile,
                 "predicted_refs": predicted_refs,
+                "dense_top_candidates": [
+                    {
+                        "para_id": item["para_id"],
+                        "score": float(item.get("score", 0.0)),
+                    }
+                    for item in dense_retrieved[:5]
+                ],
                 "top_candidates": [
                     {
                         "para_id": item["para_id"],
@@ -292,12 +309,14 @@ def main() -> None:
     pred_df.to_csv(args.output_dir / "val_predictions.csv", index=False, encoding="utf-8")
 
     metrics, merged = run_evaluation(gold_df, pred_df, embedder)
-    metrics.update(
-        compute_retrieval_metrics(
-            [sample["gold_refs"] for sample in val_raw_samples],
-            reranked_retrievals,
-        )
-    )
+    gold_refs_list = [sample["gold_refs"] for sample in val_raw_samples]
+    dense_metrics = compute_retrieval_metrics(gold_refs_list, dense_retrievals)
+    reranked_metrics = compute_retrieval_metrics(gold_refs_list, reranked_retrievals)
+    selected_metrics = compute_selected_reference_metrics(gold_refs_list, predicted_refs_list)
+    metrics.update({f"dense_{key}": value for key, value in dense_metrics.items()})
+    metrics.update({f"reranked_{key}": value for key, value in reranked_metrics.items()})
+    metrics.update(selected_metrics)
+    metrics.update(reranked_metrics)
     answer_lengths = [len(row["abstractive"]) for row in prediction_rows]
     malformed = [
         row for row in prediction_rows
@@ -308,6 +327,7 @@ def main() -> None:
     metrics["pred_answer_length_median"] = float(pd.Series(answer_lengths).median()) if answer_lengths else 0.0
     metrics["pred_answer_length_mean"] = float(pd.Series(answer_lengths).mean()) if answer_lengths else 0.0
     metrics["format_error_rate"] = len(malformed) / max(1, len(prediction_rows))
+    metrics["effective_retrieval_top_k"] = float(effective_retrieval_top_k)
     save_json(args.output_dir / "validation_metrics.json", metrics)
     save_json(args.output_dir / "retrieval_diagnostics.json", {"rows": retrieval_diagnostics})
 

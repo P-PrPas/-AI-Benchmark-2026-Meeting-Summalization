@@ -151,6 +151,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  model_name_or_path={resolve_model_source(args.model_name_or_path, args.project_root)}")
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
     print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
+    print(f"  use_reranker={runtime_config.USE_RERANKER}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
     print(f"  artifact_name={DEFAULT_ARTIFACT_NAME}")

@@ -1,8 +1,12 @@
+import inspect
 import unittest
+from unittest.mock import patch
 
-from src.prompting import ANSWER_PROFILE_FACT, ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS
+from src import reranker as reranker_module
+from src.prompting import ANSWER_PROFILE_FACT, ANSWER_PROFILE_LIST
 from src.retrieval import (
     ReferenceSelectionConfig,
+    build_generation_context,
     compress_evidence,
     rewrite_query_heuristic,
     select_references_from_retrieved,
@@ -12,7 +16,7 @@ from src.retrieval import (
 class RetrievalTests(unittest.TestCase):
     def test_dynamic_ref_selection_keeps_single_fact_ref(self):
         retrieved = [
-            {"para_id": "P1", "score": 0.95, "selection_score": 0.95, "text": "นายกฯ ชี้แจงต่อที่ประชุม"},
+            {"para_id": "P1", "score": 0.95, "selection_score": 0.95, "text": "ประธานชี้แจงต่อที่ประชุม"},
             {"para_id": "P2", "score": 0.20, "selection_score": 0.20, "text": "ข้อมูลประกอบอื่น"},
             {"para_id": "P3", "score": 0.10, "selection_score": 0.10, "text": "ข้อมูลรอง"},
         ]
@@ -20,6 +24,7 @@ class RetrievalTests(unittest.TestCase):
             retrieved,
             profile=ANSWER_PROFILE_FACT,
             calibration_config=ReferenceSelectionConfig(),
+            mode="dynamic",
         )
         self.assertEqual(refs, ["P1"])
 
@@ -33,15 +38,28 @@ class RetrievalTests(unittest.TestCase):
             retrieved,
             profile=ANSWER_PROFILE_LIST,
             calibration_config=ReferenceSelectionConfig(),
+            mode="dynamic",
         )
+        self.assertEqual(refs, ["P1", "P2", "P3"])
+
+    def test_fixed_ref_selection_keeps_top_three(self):
+        retrieved = [
+            {"para_id": "P1", "score": 0.91, "selection_score": 0.91, "text": "A"},
+            {"para_id": "P2", "score": 0.89, "selection_score": 0.89, "text": "B"},
+            {"para_id": "P3", "score": 0.87, "selection_score": 0.87, "text": "C"},
+            {"para_id": "P4", "score": 0.10, "selection_score": 0.10, "text": "D"},
+        ]
+        refs = select_references_from_retrieved(retrieved, n=3, mode="fixed")
         self.assertEqual(refs, ["P1", "P2", "P3"])
 
     def test_compress_evidence_for_fact_returns_shorter_context(self):
         paragraphs = [
             {
                 "para_id": "P7",
-                "text": "ประธานการประชุมคือ นายสมชาย ใจดี ซึ่งทำหน้าที่เปิดการประชุมอย่างเป็นทางการ "
-                "หลังจากนั้นที่ประชุมได้พิจารณาระเบียบวาระอื่นต่อ",
+                "text": (
+                    "ประธานการประชุมคือ นายสมชาย ใจดี ซึ่งทำหน้าที่เปิดการประชุมอย่างเป็นทางการ "
+                    "หลังจากนั้นที่ประชุมได้พิจารณาระเบียบวาระอื่นต่อ"
+                ),
             }
         ]
         compressed = compress_evidence("ประธานการประชุมคือใคร", paragraphs, ANSWER_PROFILE_FACT)
@@ -49,10 +67,29 @@ class RetrievalTests(unittest.TestCase):
         self.assertIn("ประธานการประชุม", compressed[0]["text"])
         self.assertLessEqual(len(compressed[0]["text"]), len(paragraphs[0]["text"]))
 
+    def test_build_generation_context_skips_compression_when_disabled(self):
+        reranked = [
+            {"para_id": "P1", "text": "ประธานคือ นายสมชาย ใจดี และดำเนินการประชุมต่อไป", "score": 0.9},
+            {"para_id": "P2", "text": "ข้อมูลเพิ่มเติม", "score": 0.2},
+        ]
+        with patch("src.retrieval.config.ENABLE_EVIDENCE_COMPRESSION", False):
+            context = build_generation_context(
+                "ประธานการประชุมคือใคร",
+                reranked,
+                ["P1"],
+                ANSWER_PROFILE_FACT,
+            )
+        self.assertEqual(context[0]["text"], reranked[0]["text"])
+
     def test_rewrite_query_heuristic_expands_abbreviation(self):
         rewritten = rewrite_query_heuristic("กมธ. เชิญใครบ้าง")
         self.assertIn("คณะกรรมาธิการ", rewritten)
         self.assertNotIn("กมธ.", rewritten)
+
+    def test_reranker_wrapper_does_not_use_sequence_classification_path(self):
+        source = inspect.getsource(reranker_module)
+        self.assertIn("AutoModelForCausalLM", source)
+        self.assertNotIn("AutoModelForSequenceClassification", source)
 
 
 if __name__ == "__main__":

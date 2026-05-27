@@ -7,7 +7,12 @@ import sys
 from src import config as runtime_config
 from src.prompting import detect_answer_profile
 from src.reranker import load_reranker_if_available
-from src.retrieval import compute_retrieval_metrics, rerank_retrieved, select_references_from_retrieved
+from src.retrieval import (
+    compute_retrieval_metrics,
+    compute_selected_reference_metrics,
+    rerank_retrieved,
+    select_references_from_retrieved,
+)
 
 from .common import (
     DEFAULT_EMBED_MODEL_PATH,
@@ -91,7 +96,7 @@ def main() -> None:
         device="cuda" if torch.cuda.is_available() else "cpu",
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
-    reranker = load_reranker_if_available(args.model_name_or_path)
+    reranker = load_reranker_if_available(args.model_name_or_path, force=True)
     if reranker is None:
         raise RuntimeError(f"Unable to load reranker from {args.model_name_or_path}")
     reranker.load_model()
@@ -100,23 +105,28 @@ def main() -> None:
     prediction_rows = []
     diagnostics = []
     gold_refs_list = []
+    dense_retrievals = []
     reranked_retrievals = []
+    predicted_refs_list = []
+    effective_retrieval_top_k = max(args.retrieval_top_k, runtime_config.RERANK_TOP_K)
     for query in val_queries:
         dense_retrieved = retrieve_paragraphs(
             doc_embedding_index,
             query["doc_id"],
             query["query"],
             embedder,
-            args.retrieval_top_k,
+            effective_retrieval_top_k,
         )
+        dense_retrievals.append(dense_retrieved)
         reranked = rerank_retrieved(
             query["query"],
             dense_retrieved,
             reranker=reranker,
-            rerank_top_k=args.retrieval_top_k,
+            rerank_top_k=runtime_config.RERANK_TOP_K,
         )
         profile = detect_answer_profile(query["query"], reranked)
         predicted_refs = select_references_from_retrieved(reranked, profile=profile, n=args.reference_top_n)
+        predicted_refs_list.append(predicted_refs)
         prediction_rows.append({"ID": query["ID"], "refs": ",".join(predicted_refs)})
         diagnostics.append(
             {
@@ -124,6 +134,13 @@ def main() -> None:
                 "profile": profile,
                 "gold_refs": query.get("refs", []),
                 "pred_refs": predicted_refs,
+                "dense_top_candidates": [
+                    {
+                        "para_id": item["para_id"],
+                        "score": float(item.get("score", 0.0)),
+                    }
+                    for item in dense_retrieved[:5]
+                ],
                 "top_candidates": [
                     {
                         "para_id": item["para_id"],
@@ -139,8 +156,14 @@ def main() -> None:
         reranked_retrievals.append(reranked)
 
     pred_df = pd.DataFrame(prediction_rows)
-    metrics = compute_retrieval_metrics(gold_refs_list, reranked_retrievals)
-    metrics["pred_ref_count_mean"] = float(pred_df["refs"].apply(lambda value: len([x for x in value.split(",") if x])).mean())
+    dense_metrics = compute_retrieval_metrics(gold_refs_list, dense_retrievals)
+    reranked_metrics = compute_retrieval_metrics(gold_refs_list, reranked_retrievals)
+    selected_metrics = compute_selected_reference_metrics(gold_refs_list, predicted_refs_list)
+    metrics = {f"dense_{key}": value for key, value in dense_metrics.items()}
+    metrics.update({f"reranked_{key}": value for key, value in reranked_metrics.items()})
+    metrics.update(selected_metrics)
+    metrics.update(reranked_metrics)
+    metrics["effective_retrieval_top_k"] = float(effective_retrieval_top_k)
     save_json(args.output_dir / "reranker_validation_metrics.json", metrics)
     save_json(args.output_dir / "reranker_validation_diagnostics.json", {"rows": diagnostics})
     print(metrics)

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import os
 import sys
 from pathlib import Path
 from typing import Any, Sequence
 
 from src import config as runtime_config
+from src.reranker import RERANK_ASSISTANT_SUFFIX, RERANK_SYSTEM_PREFIX, format_reranker_pair
 
 from .common import (
     DEFAULT_EMBED_MODEL_PATH,
@@ -25,6 +24,7 @@ from .common import (
     load_training_data,
     resolve_model_source,
     resolve_path,
+    retrieve_paragraphs,
     save_json,
     set_global_seed,
 )
@@ -37,7 +37,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Fine-tune Qwen3 reranker for paragraph relevance")
+    parser = argparse.ArgumentParser(description="Fine-tune Qwen3 reranker with official causal-LM yes/no scoring")
     parser.add_argument("--project-root", default=str(LANTA_PROJECT_ROOT))
     parser.add_argument("--train-json-path")
     parser.add_argument("--model-name-or-path", default=str(DEFAULT_RERANK_MODEL_PATH))
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-doc-ratio", type=float, default=0.2)
     parser.add_argument("--retrieval-top-k", type=int, default=runtime_config.RERANK_TOP_K)
-    parser.add_argument("--max-seq-len", type=int, default=1536)
+    parser.add_argument("--max-seq-len", type=int, default=2048)
     parser.add_argument("--train-batch-size", type=int, default=1)
     parser.add_argument("--eval-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=16)
@@ -65,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
+    parser.add_argument("--instruction", default=runtime_config.RERANK_INSTRUCTION)
     parser.add_argument("--skip-merge", action="store_true")
     return parser
 
@@ -98,9 +99,7 @@ def build_pair_rows(
     embedder,
     *,
     retrieval_top_k: int,
-):
-    from .common import retrieve_paragraphs
-
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for query in queries:
         gold_refs = set(query.get("refs", []))
@@ -141,40 +140,76 @@ def build_pair_rows(
     return rows
 
 
-class PairwiseDataCollator:
+def tokenize_rows(
+    rows: Sequence[dict[str, Any]],
+    tokenizer,
+    *,
+    instruction: str,
+    max_seq_len: int,
+) -> tuple[Any, list[dict[str, Any]]]:
+    from datasets import Dataset
+
+    encoded_rows: list[dict[str, Any]] = []
+    dropped_rows: list[dict[str, Any]] = []
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        raise ValueError("Tokenizer must define eos_token_id for reranker fine-tuning.")
+
+    for row in rows:
+        pair_text = format_reranker_pair(row["query"], row["text"], instruction=instruction)
+        prompt_text = RERANK_SYSTEM_PREFIX + pair_text + RERANK_ASSISTANT_SUFFIX
+        target_text = "yes" if row["label"] else "no"
+
+        prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+        target_ids = tokenizer(target_text, add_special_tokens=False)["input_ids"] + [eos_token_id]
+        full_ids = prompt_ids + target_ids
+        if len(full_ids) > max_seq_len:
+            dropped_rows.append(
+                {
+                    "ID": row["ID"],
+                    "para_id": row["para_id"],
+                    "label": row["label"],
+                    "reason": f"overlength:{len(full_ids)}",
+                }
+            )
+            continue
+        encoded_rows.append(
+            {
+                "input_ids": full_ids,
+                "attention_mask": [1] * len(full_ids),
+                "labels": ([-100] * len(prompt_ids)) + target_ids,
+            }
+        )
+    if not encoded_rows:
+        raise ValueError("No usable reranker training rows remain after tokenization.")
+    return Dataset.from_list(encoded_rows), dropped_rows
+
+
+class CausalLMDataCollator:
     def __init__(self, tokenizer) -> None:
         self.tokenizer = tokenizer
 
     def __call__(self, features: Sequence[dict[str, Any]]) -> dict[str, Any]:
         import torch
 
-        labels = torch.tensor([feature["labels"] for feature in features], dtype=torch.float32)
-        text_features = [{"input_ids": f["input_ids"], "attention_mask": f["attention_mask"]} for f in features]
-        batch = self.tokenizer.pad(text_features, padding=True, return_tensors="pt")
-        batch["labels"] = labels
-        return batch
+        max_len = max(len(feature["input_ids"]) for feature in features)
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            raise ValueError("Tokenizer must define pad_token_id for batching reranker samples.")
 
-
-def tokenize_rows(rows: Sequence[dict[str, Any]], tokenizer, max_seq_len: int):
-    from datasets import Dataset
-
-    encoded_rows = []
-    for row in rows:
-        encoded = tokenizer(
-            row["query"],
-            row["text"],
-            truncation=True,
-            max_length=max_seq_len,
-            add_special_tokens=True,
-        )
-        encoded_rows.append(
-            {
-                "input_ids": encoded["input_ids"],
-                "attention_mask": encoded["attention_mask"],
-                "labels": float(row["label"]),
-            }
-        )
-    return Dataset.from_list(encoded_rows)
+        input_ids = []
+        attention_mask = []
+        labels = []
+        for feature in features:
+            pad_length = max_len - len(feature["input_ids"])
+            input_ids.append(feature["input_ids"] + [pad_token_id] * pad_length)
+            attention_mask.append(feature["attention_mask"] + [0] * pad_length)
+            labels.append(feature["labels"] + [-100] * pad_length)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
 
 
 def main() -> None:
@@ -184,16 +219,9 @@ def main() -> None:
     set_global_seed(args.seed)
 
     import torch
-    import torch.nn.functional as F
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model, prepare_model_for_kbit_training
     from sentence_transformers import SentenceTransformer
-    from transformers import (
-        AutoModelForSequenceClassification,
-        AutoTokenizer,
-        BitsAndBytesConfig,
-        Trainer,
-        TrainingArguments,
-    )
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments
 
     if not torch.cuda.is_available():
         raise RuntimeError("Reranker training requires a CUDA-enabled server runtime.")
@@ -204,6 +232,7 @@ def main() -> None:
         args.val_doc_ratio,
         args.seed,
     )
+
     embed_source = resolve_model_source(args.embed_model_name_or_path, project_root=args.project_root)
     embedder = SentenceTransformer(
         embed_source,
@@ -211,8 +240,8 @@ def main() -> None:
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
     train_docs = [doc_lookup[doc_id] for doc_id in sorted(train_doc_ids)]
-    train_doc_embedding_index = build_document_embedding_index(train_docs, embedder)
     val_docs = [doc_lookup[doc_id] for doc_id in sorted(val_doc_ids)]
+    train_doc_embedding_index = build_document_embedding_index(train_docs, embedder)
     val_doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
     train_rows = build_pair_rows(
@@ -235,13 +264,25 @@ def main() -> None:
         model_source,
         trust_remote_code=True,
         cache_dir=cache_dir_as_str(args.cache_dir),
+        padding_side="left",
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
+    if tokenizer.pad_token is None:
+        raise ValueError("Tokenizer must define pad_token or eos_token for reranker fine-tuning.")
 
-    train_dataset = tokenize_rows(train_rows, tokenizer, args.max_seq_len)
-    val_dataset = tokenize_rows(val_rows, tokenizer, args.max_seq_len)
+    train_dataset, dropped_train_rows = tokenize_rows(
+        train_rows,
+        tokenizer,
+        instruction=args.instruction,
+        max_seq_len=args.max_seq_len,
+    )
+    val_dataset, dropped_val_rows = tokenize_rows(
+        val_rows,
+        tokenizer,
+        instruction=args.instruction,
+        max_seq_len=args.max_seq_len,
+    )
 
     compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     bnb_config = BitsAndBytesConfig(
@@ -250,7 +291,7 @@ def main() -> None:
         bnb_4bit_use_double_quant=True,
         bnb_4bit_compute_dtype=compute_dtype,
     )
-    model = AutoModelForSequenceClassification.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_source,
         quantization_config=bnb_config,
         device_map="auto",
@@ -266,28 +307,27 @@ def main() -> None:
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
             target_modules=args.lora_target_modules,
-            task_type=TaskType.SEQ_CLS,
+            task_type=TaskType.CAUSAL_LM,
             bias="none",
         ),
     )
-
-    class BinaryClassificationTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-            labels = inputs.pop("labels")
-            outputs = model(**inputs)
-            logits = outputs.logits
-            if logits.ndim == 2 and logits.shape[-1] == 1:
-                loss = F.binary_cross_entropy_with_logits(logits[:, 0], labels)
-            elif logits.ndim == 2 and logits.shape[-1] >= 2:
-                loss = F.cross_entropy(logits, labels.long())
-            else:
-                loss = F.binary_cross_entropy_with_logits(logits.reshape(-1), labels)
-            return (loss, outputs) if return_outputs else loss
 
     effective_batch_size = max(1, args.train_batch_size * args.gradient_accumulation_steps)
     steps_per_epoch = math.ceil(len(train_dataset) / effective_batch_size)
     warmup_steps = max(0, int(max(1, steps_per_epoch * args.num_train_epochs) * args.warmup_ratio))
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    save_json(
+        args.output_dir / "split_metadata.json",
+        {
+            "train_doc_ids": sorted(train_doc_ids),
+            "val_doc_ids": sorted(val_doc_ids),
+            "train_query_ids": [query["ID"] for query in train_queries],
+            "val_query_ids": [query["ID"] for query in val_queries],
+            "seed": args.seed,
+            "val_doc_ratio": args.val_doc_ratio,
+        },
+    )
+
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
         per_device_train_batch_size=args.train_batch_size,
@@ -308,22 +348,23 @@ def main() -> None:
         gradient_checkpointing=True,
         lr_scheduler_type="cosine",
     )
-    trainer = BinaryClassificationTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         tokenizer=tokenizer,
-        data_collator=PairwiseDataCollator(tokenizer),
+        data_collator=CausalLMDataCollator(tokenizer),
     )
     trainer.train()
+
     adapter_dir = args.output_dir / "final_adapter"
     trainer.save_model(str(adapter_dir))
     tokenizer.save_pretrained(adapter_dir)
 
     final_model_dir = args.output_dir / "final_model"
     if not args.skip_merge:
-        base_model = AutoModelForSequenceClassification.from_pretrained(
+        base_model = AutoModelForCausalLM.from_pretrained(
             model_source,
             torch_dtype=compute_dtype,
             device_map="auto",
@@ -341,6 +382,10 @@ def main() -> None:
         {
             "train_rows": len(train_rows),
             "val_rows": len(val_rows),
+            "train_rows_after_tokenization": len(train_dataset),
+            "val_rows_after_tokenization": len(val_dataset),
+            "dropped_train_rows": dropped_train_rows[:200],
+            "dropped_val_rows": dropped_val_rows[:200],
             "train_query_count": len(train_queries),
             "val_query_count": len(val_queries),
             "train_doc_ids": sorted(train_doc_ids),
@@ -348,6 +393,7 @@ def main() -> None:
             "model_name_or_path": model_source,
             "embed_model_name_or_path": embed_source,
             "output_dir": str(args.output_dir),
+            "instruction": args.instruction,
         },
     )
     print(f"Saved adapter to {adapter_dir}")
