@@ -410,14 +410,20 @@ def main() -> None:
 
     training_args = TrainingArguments(**training_args_kwargs)
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        data_collator=SupervisedDataCollator(tokenizer),
-        callbacks=[JsonlLoggingCallback(args.output_dir / "trainer_logs.jsonl")],
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": val_dataset,
+        "data_collator": SupervisedDataCollator(tokenizer),
+        "callbacks": [JsonlLoggingCallback(args.output_dir / "trainer_logs.jsonl")],
+    }
+    trainer_signature = set(Trainer.__init__.__code__.co_varnames)
+    if "processing_class" in trainer_signature:
+        trainer_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in trainer_signature:
+        trainer_kwargs["tokenizer"] = tokenizer
+    trainer = Trainer(**trainer_kwargs)
 
     train_result = trainer.train()
     trainer.save_state()

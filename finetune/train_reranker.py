@@ -348,14 +348,19 @@ def main() -> None:
         gradient_checkpointing=True,
         lr_scheduler_type="cosine",
     )
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        tokenizer=tokenizer,
-        data_collator=CausalLMDataCollator(tokenizer),
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": val_dataset,
+        "data_collator": CausalLMDataCollator(tokenizer),
+    }
+    trainer_signature = set(Trainer.__init__.__code__.co_varnames)
+    if "processing_class" in trainer_signature:
+        trainer_kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in trainer_signature:
+        trainer_kwargs["tokenizer"] = tokenizer
+    trainer = Trainer(**trainer_kwargs)
     trainer.train()
 
     adapter_dir = args.output_dir / "final_adapter"
