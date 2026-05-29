@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import os
+import sys
 from pathlib import Path
 
 from src.prompting import detect_answer_profile
@@ -24,6 +26,12 @@ from .common import (
     retrieve_paragraphs,
     save_json,
 )
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +68,21 @@ def _predict_refs(query: str, reranked: list[dict], profile: str, keep2_model, k
     return selected
 
 
+def print_runtime_config(args: argparse.Namespace) -> None:
+    print("Runtime configuration")
+    print(f"  project_root={args.project_root}")
+    print(f"  train_json_path={args.train_json_path}")
+    print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
+    print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
+    print(f"  output_path={args.output_path}")
+    print(f"  cache_dir={args.cache_dir}")
+    print(f"  val_doc_ratio={args.val_doc_ratio}")
+    print(f"  seed={args.seed}")
+    print(f"  retrieval_top_k={args.retrieval_top_k}")
+    print(f"  python={sys.executable}")
+    print(f"  cuda_available={os.environ.get('CUDA_VISIBLE_DEVICES', 'default')}")
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -73,24 +96,34 @@ def main() -> None:
     from sentence_transformers import SentenceTransformer
     from sklearn.linear_model import LogisticRegression
 
+    print_runtime_config(args)
+    print("[1/6] Loading training data ...")
     docs, queries, doc_lookup = load_training_data(args.train_json_path)
     train_queries, val_queries, train_doc_ids, val_doc_ids = grouped_doc_split(queries, args.val_doc_ratio, args.seed)
+    print(f"      docs={len(docs)} queries={len(queries)} train_queries={len(train_queries)} val_queries={len(val_queries)}")
+    print("[2/6] Loading embedder ...")
     embedder = SentenceTransformer(
         resolve_model_source(args.embed_model_name_or_path, project_root=args.project_root),
         device="cuda" if torch.cuda.is_available() else "cpu",
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
+    print("[3/6] Loading reranker ...")
     reranker = load_reranker_if_available(args.rerank_model_name_or_path)
     if reranker is not None:
         reranker.load_model()
+        print("      reranker loaded")
+    else:
+        print("      reranker unavailable")
 
+    print("[4/6] Building document indices ...")
     train_index = build_document_embedding_index([doc_lookup[doc_id] for doc_id in sorted(train_doc_ids)], embedder)
     val_index = build_document_embedding_index([doc_lookup[doc_id] for doc_id in sorted(val_doc_ids)], embedder)
 
+    print("[5/6] Building selector dataset ...")
     train_x = []
     train_y2 = []
     train_y3 = []
-    for query_row in train_queries:
+    for index, query_row in enumerate(train_queries, start=1):
         dense = retrieve_paragraphs(train_index, query_row["doc_id"], query_row["query"], embedder, args.retrieval_top_k)
         reranked = rerank_retrieved(query_row["query"], dense, profile=detect_answer_profile(query_row["query"], dense), reranker=reranker)
         if not reranked:
@@ -101,7 +134,11 @@ def main() -> None:
         train_x.append([features[name] for name in FEATURE_ORDER])
         train_y2.append(keep2)
         train_y3.append(keep3 if profile in {"list", "synthesis"} else 0)
+        if index % 200 == 0:
+            print(f"      processed train queries={index}/{len(train_queries)}")
 
+    print(f"      usable_train_rows={len(train_x)}")
+    print("[6/6] Fitting selector models ...")
     keep2_model = LogisticRegression(max_iter=200, class_weight="balanced")
     keep3_model = LogisticRegression(max_iter=200, class_weight="balanced")
     keep2_model.fit(train_x, train_y2)
@@ -112,12 +149,15 @@ def main() -> None:
 
     val_gold = []
     val_pred = []
-    for query_row in val_queries:
+    print("[7/7] Evaluating selector on held-out split ...")
+    for index, query_row in enumerate(val_queries, start=1):
         dense = retrieve_paragraphs(val_index, query_row["doc_id"], query_row["query"], embedder, args.retrieval_top_k)
         reranked = rerank_retrieved(query_row["query"], dense, profile=detect_answer_profile(query_row["query"], dense), reranker=reranker)
         profile = detect_answer_profile(query_row["query"], reranked)
         val_gold.append(list(query_row.get("refs", [])))
         val_pred.append(_predict_refs(query_row["query"], reranked, profile, keep2_model, keep3_model))
+        if index % 100 == 0:
+            print(f"      processed val queries={index}/{len(val_queries)}")
 
     metrics = compute_selected_reference_metrics(val_gold, val_pred)
     save_json(
@@ -128,6 +168,8 @@ def main() -> None:
             **metrics,
         },
     )
+    print(f"Saved selector model -> {args.output_path}")
+    print(f"Saved selector metrics -> {args.output_path.with_suffix('.metrics.json')}")
     print(json.dumps({"model_path": str(args.output_path), **metrics}, ensure_ascii=False))
 
 

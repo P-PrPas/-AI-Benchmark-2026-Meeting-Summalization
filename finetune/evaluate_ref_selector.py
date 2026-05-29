@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 
 from src.prompting import detect_answer_profile
 from src.ref_selector import FEATURE_ORDER, LearnedRefSelector, extract_selector_features
@@ -22,6 +24,12 @@ from .common import (
     retrieve_paragraphs,
     save_json,
 )
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +60,22 @@ def _predict_refs(query: str, reranked: list[dict], profile: str, selector: Lear
     return selected
 
 
+def print_runtime_config(args: argparse.Namespace) -> None:
+    print("Runtime configuration")
+    print(f"  project_root={args.project_root}")
+    print(f"  train_json_path={args.train_json_path}")
+    print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
+    print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
+    print(f"  selector_model_path={args.selector_model_path}")
+    print(f"  output_path={args.output_path}")
+    print(f"  cache_dir={args.cache_dir}")
+    print(f"  val_doc_ratio={args.val_doc_ratio}")
+    print(f"  seed={args.seed}")
+    print(f"  retrieval_top_k={args.retrieval_top_k}")
+    print(f"  python={sys.executable}")
+    print(f"  cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES', 'default')}")
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -77,24 +101,31 @@ def main() -> None:
         reranker.load_model()
     selector = LearnedRefSelector(str(args.selector_model_path))
     selector.load_model()
+    print_runtime_config(args)
+    print("[1/4] Loading data and building indices ...")
     val_index = build_document_embedding_index([doc_lookup[doc_id] for doc_id in sorted(val_doc_ids)], embedder)
 
     gold_refs = []
     rule_refs = []
     selector_refs = []
-    for query_row in val_queries:
+    print("[2/4] Running selector on validation split ...")
+    for index, query_row in enumerate(val_queries, start=1):
         dense = retrieve_paragraphs(val_index, query_row["doc_id"], query_row["query"], embedder, args.retrieval_top_k)
         reranked = rerank_retrieved(query_row["query"], dense, profile=detect_answer_profile(query_row["query"], dense), reranker=reranker)
         profile = detect_answer_profile(query_row["query"], reranked)
         gold_refs.append(list(query_row.get("refs", [])))
         rule_refs.append(select_references_from_retrieved(reranked, profile=profile))
         selector_refs.append(_predict_refs(query_row["query"], reranked, profile, selector))
+        if index % 100 == 0:
+            print(f"      processed val queries={index}/{len(val_queries)}")
 
+    print("[3/4] Computing metrics ...")
     metrics = {
         "rule": compute_selected_reference_metrics(gold_refs, rule_refs),
         "selector": compute_selected_reference_metrics(gold_refs, selector_refs),
     }
     save_json(args.output_path, metrics)
+    print(f"Saved selector metrics -> {args.output_path}")
     print(json.dumps(metrics, ensure_ascii=False))
 
 
