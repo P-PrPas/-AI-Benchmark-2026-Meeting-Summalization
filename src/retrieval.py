@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -46,6 +46,17 @@ class ReferenceSelectionConfig:
     aggregate_max_gap: float = config.REF_SELECTION_AGG_MAX_GAP
     low_confidence_top1: float = config.REF_SELECTION_LOW_CONFIDENCE
     max_entropy: float = config.QUERY_REFINEMENT_MAX_ENTROPY
+
+
+@dataclass(frozen=True)
+class ReferenceSelectionResult:
+    selected_refs: List[str]
+    rule_refs: List[str]
+    arbiter_refs: List[str]
+    arbiter_triggered: bool
+    arbiter_used: bool
+    arbiter_fallback: bool
+    profile: str
 
 
 def retrieval_candidate_count(*, use_reranker: bool | None = None) -> int:
@@ -299,24 +310,16 @@ def _selection_scores(retrieved: Sequence[Dict]) -> List[float]:
     return _softmax(scores[: max(config.REFERENCE_TOP_N_MAX, 4)])
 
 
-def select_references_from_retrieved(
+def _dynamic_rule_select(
     retrieved: Sequence[Dict],
-    profile: str | None = None,
+    *,
+    profile: str,
     calibration_config: ReferenceSelectionConfig | None = None,
     n: int | None = None,
-    mode: str | None = None,
 ) -> List[str]:
     if not retrieved:
         return []
-    mode = (mode or ("dynamic" if config.ENABLE_DYNAMIC_REF_SELECTION else "fixed")).lower()
-    if mode not in {"fixed", "dynamic"}:
-        raise ValueError(f"Unsupported reference selection mode: {mode}")
-    if mode == "fixed":
-        limit = n or config.REFERENCE_TOP_N
-        return [item["para_id"] for item in retrieved[:limit]]
-
     calibration_config = calibration_config or ReferenceSelectionConfig()
-    profile = profile or ANSWER_PROFILE_FACT
     limit = min(len(retrieved), n or calibration_config.max_refs)
     probs = _selection_scores(retrieved[:limit])
     selected = [retrieved[0]["para_id"]]
@@ -334,6 +337,203 @@ def select_references_from_retrieved(
         if probs[3] >= calibration_config.top3_min and probs[2] - probs[3] <= gap_limit:
             selected.append(retrieved[3]["para_id"])
     return selected
+
+
+def _arbiter_candidate_count(profile: str) -> int:
+    if profile == ANSWER_PROFILE_FACT:
+        return min(2, max(1, config.REF_ARBITER_MAX_CANDIDATES))
+    if profile == ANSWER_PROFILE_SYNTHESIS:
+        return min(3, max(2, config.REF_ARBITER_MAX_CANDIDATES))
+    return min(3, max(2, config.REF_ARBITER_MAX_CANDIDATES))
+
+
+def _should_trigger_ref_arbiter(
+    retrieved: Sequence[Dict],
+    *,
+    profile: str,
+    calibration_config: ReferenceSelectionConfig,
+) -> bool:
+    if not config.ENABLE_LLM_REF_ARBITER or not retrieved:
+        return False
+
+    trigger_mode = (config.REF_ARBITER_TRIGGER_MODE or "ambiguous_only").strip().lower()
+    if trigger_mode == "always":
+        return True
+    if trigger_mode != "ambiguous_only":
+        return False
+
+    top_k = min(len(retrieved), _arbiter_candidate_count(profile))
+    top_scores = [float(item.get("selection_score", item.get("score", 0.0))) for item in retrieved[:top_k]]
+    if len(top_scores) < 2:
+        return False
+
+    top1 = top_scores[0]
+    top2 = top_scores[1]
+    entropy = normalized_score_entropy(top_scores)
+    gap_limit = calibration_config.fact_max_gap if profile == ANSWER_PROFILE_FACT else calibration_config.aggregate_max_gap
+
+    if abs(top1 - top2) <= gap_limit:
+        return True
+    if entropy >= calibration_config.max_entropy:
+        return True
+    if top1 < calibration_config.low_confidence_top1:
+        return True
+    if profile in {ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS} and len(top_scores) >= 3:
+        top3 = top_scores[2]
+        if abs(top2 - top3) <= gap_limit:
+            return True
+    return False
+
+
+def _apply_ref_arbiter(
+    query: str,
+    retrieved: Sequence[Dict],
+    *,
+    profile: str,
+    rule_refs: Sequence[str],
+    generator: Any | None = None,
+) -> tuple[List[str], bool, bool]:
+    if generator is None:
+        return list(rule_refs), False, False
+    candidate_count = min(len(retrieved), _arbiter_candidate_count(profile))
+    candidate_paragraphs = [dict(item) for item in retrieved[:candidate_count]]
+    arbiter_refs = generator.arbitrate_references(
+        query,
+        candidate_paragraphs,
+        profile=profile,
+        rule_refs=list(rule_refs),
+    )
+    if not arbiter_refs:
+        return list(rule_refs), True, True
+
+    candidate_ids = {item["para_id"] for item in candidate_paragraphs}
+    valid_refs = []
+    for para_id in arbiter_refs:
+        if para_id in candidate_ids and para_id not in valid_refs:
+            valid_refs.append(para_id)
+    if not valid_refs:
+        return list(rule_refs), True, True
+    return valid_refs, True, False
+
+
+def select_references_with_diagnostics(
+    query: str,
+    retrieved: Sequence[Dict],
+    *,
+    profile: str | None = None,
+    calibration_config: ReferenceSelectionConfig | None = None,
+    n: int | None = None,
+    mode: str | None = None,
+    generator: Any | None = None,
+) -> ReferenceSelectionResult:
+    profile = profile or ANSWER_PROFILE_FACT
+    if not retrieved:
+        return ReferenceSelectionResult(
+            selected_refs=[],
+            rule_refs=[],
+            arbiter_refs=[],
+            arbiter_triggered=False,
+            arbiter_used=False,
+            arbiter_fallback=False,
+            profile=profile,
+        )
+
+    if mode:
+        resolved_mode = mode.lower()
+    elif config.ENABLE_DYNAMIC_REF_SELECTION:
+        resolved_mode = "dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else "dynamic_rules"
+    else:
+        resolved_mode = "fixed"
+    if resolved_mode not in {"fixed", "dynamic_rules", "dynamic_rules_then_llm_arbiter", "dynamic", "dynamic_rules_then_arbiter"}:
+        raise ValueError(f"Unsupported reference selection mode: {resolved_mode}")
+    if resolved_mode == "dynamic":
+        resolved_mode = "dynamic_rules"
+    if resolved_mode == "dynamic_rules_then_arbiter":
+        resolved_mode = "dynamic_rules_then_llm_arbiter"
+
+    calibration_config = calibration_config or ReferenceSelectionConfig()
+    if resolved_mode == "fixed":
+        selected_refs = [item["para_id"] for item in retrieved[: (n or config.REFERENCE_TOP_N)]]
+        return ReferenceSelectionResult(
+            selected_refs=selected_refs,
+            rule_refs=selected_refs,
+            arbiter_refs=[],
+            arbiter_triggered=False,
+            arbiter_used=False,
+            arbiter_fallback=False,
+            profile=profile,
+        )
+
+    rule_limit = n or calibration_config.max_refs
+    rule_refs = _dynamic_rule_select(
+        retrieved,
+        profile=profile,
+        calibration_config=calibration_config,
+        n=rule_limit,
+    )
+    if resolved_mode == "dynamic_rules":
+        return ReferenceSelectionResult(
+            selected_refs=rule_refs,
+            rule_refs=rule_refs,
+            arbiter_refs=[],
+            arbiter_triggered=False,
+            arbiter_used=False,
+            arbiter_fallback=False,
+            profile=profile,
+        )
+
+    arbiter_triggered = _should_trigger_ref_arbiter(
+        retrieved,
+        profile=profile,
+        calibration_config=calibration_config,
+    )
+    if not arbiter_triggered:
+        return ReferenceSelectionResult(
+            selected_refs=rule_refs,
+            rule_refs=rule_refs,
+            arbiter_refs=[],
+            arbiter_triggered=False,
+            arbiter_used=False,
+            arbiter_fallback=False,
+            profile=profile,
+        )
+
+    selected_refs, arbiter_used, arbiter_fallback = _apply_ref_arbiter(
+        query,
+        retrieved,
+        profile=profile,
+        rule_refs=rule_refs,
+        generator=generator,
+    )
+    arbiter_refs = selected_refs if arbiter_used and not arbiter_fallback else []
+    return ReferenceSelectionResult(
+        selected_refs=selected_refs,
+        rule_refs=rule_refs,
+        arbiter_refs=arbiter_refs,
+        arbiter_triggered=arbiter_triggered,
+        arbiter_used=arbiter_used,
+        arbiter_fallback=arbiter_fallback,
+        profile=profile,
+    )
+
+
+def select_references_from_retrieved(
+    retrieved: Sequence[Dict],
+    profile: str | None = None,
+    calibration_config: ReferenceSelectionConfig | None = None,
+    n: int | None = None,
+    mode: str | None = None,
+) -> List[str]:
+    query = retrieved[0].get("query", "") if retrieved else ""
+    return select_references_with_diagnostics(
+        query,
+        retrieved,
+        profile=profile,
+        calibration_config=calibration_config,
+        n=n,
+        mode=mode,
+        generator=None,
+    ).selected_refs
 
 
 def sentence_split(text: str) -> List[str]:
@@ -494,6 +694,38 @@ def compute_selected_reference_metrics(
         "pred_ref_count_pct_1": count_1 / total,
         "pred_ref_count_pct_2": count_2 / total,
         "pred_ref_count_pct_3_plus": count_3_plus / total,
+    }
+
+
+def compute_selected_reference_metrics_by_profile(
+    gold_refs_list: Sequence[Sequence[str]],
+    predicted_refs_list: Sequence[Sequence[str]],
+    profiles: Sequence[str],
+) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    for profile in (ANSWER_PROFILE_FACT, ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS):
+        indices = [index for index, item_profile in enumerate(profiles) if item_profile == profile]
+        if not indices:
+            metrics[f"selected_ref_iou_{profile}"] = 0.0
+            metrics[f"pred_ref_count_mean_{profile}"] = 0.0
+            continue
+        subset_gold = [gold_refs_list[index] for index in indices]
+        subset_pred = [predicted_refs_list[index] for index in indices]
+        subset_metrics = compute_selected_reference_metrics(subset_gold, subset_pred)
+        metrics[f"selected_ref_iou_{profile}"] = subset_metrics["selected_ref_iou"]
+        metrics[f"pred_ref_count_mean_{profile}"] = subset_metrics["pred_ref_count_mean"]
+    return metrics
+
+
+def compute_arbiter_metrics(selection_results: Sequence[ReferenceSelectionResult]) -> Dict[str, float]:
+    total = max(1, len(selection_results))
+    triggered = sum(1 for result in selection_results if result.arbiter_triggered)
+    used = sum(1 for result in selection_results if result.arbiter_used)
+    fallback = sum(1 for result in selection_results if result.arbiter_fallback)
+    return {
+        "arbiter_trigger_rate": triggered / total,
+        "arbiter_usage_rate": used / total,
+        "arbiter_fallback_rate": fallback / total,
     }
 
 

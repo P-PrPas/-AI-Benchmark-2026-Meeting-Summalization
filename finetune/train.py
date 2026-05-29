@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from src import config as runtime_config
+from src.generator import Generator
 from src.reranker import load_reranker_if_available
 
 from .common import (
@@ -113,8 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug-max-train-samples", type=int)
     parser.add_argument("--debug-max-val-samples", type=int)
     parser.add_argument("--disable-training-augmentation", action="store_true")
-    parser.add_argument("--oracle-fraction", type=float, default=0.5)
-    parser.add_argument("--noisy-fraction", type=float, default=0.3)
+    parser.add_argument("--oracle-fraction", type=float, default=0.85)
+    parser.add_argument("--noisy-fraction", type=float, default=0.15)
     parser.add_argument("--synthetic-fraction", type=float, default=0.0)
     return parser
 
@@ -152,6 +153,9 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
     print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
     print(f"  use_reranker={runtime_config.USE_RERANKER}")
+    print(f"  enable_llm_ref_arbiter={runtime_config.ENABLE_LLM_REF_ARBITER}")
+    print(f"  ref_arbiter_trigger_mode={runtime_config.REF_ARBITER_TRIGGER_MODE}")
+    print(f"  enable_fact_answer_rewrite={runtime_config.ENABLE_FACT_ANSWER_REWRITE}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
     print(f"  artifact_name={DEFAULT_ARTIFACT_NAME}")
@@ -262,17 +266,28 @@ def main() -> None:
         train_raw_samples, train_missing_refs = build_raw_samples(train_queries, doc_lookup)
         augmentation_counts = {"oracle": len(train_raw_samples), "noisy_retrieved": 0, "synthetic_style": 0}
     else:
+        retrieval_generator = None
+        if runtime_config.ENABLE_LLM_REF_ARBITER:
+            retrieval_generator = Generator(model_path=args.model_name_or_path)
+            retrieval_generator.load_model()
         train_raw_samples, train_missing_refs, augmentation_counts = build_augmented_training_samples(
             train_queries,
             doc_lookup,
             train_doc_embedding_index,
             embedder,
             reranker=reranker,
+            generator=retrieval_generator,
             seed=args.seed,
             oracle_fraction=args.oracle_fraction,
             noisy_fraction=args.noisy_fraction,
             synthetic_fraction=args.synthetic_fraction,
         )
+        if retrieval_generator is not None:
+            del retrieval_generator
+            retrieval_generator = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     val_raw_samples, val_missing_refs = build_raw_samples(val_queries, doc_lookup)
 
     model_source = resolve_model_source(args.model_name_or_path, project_root=args.project_root)

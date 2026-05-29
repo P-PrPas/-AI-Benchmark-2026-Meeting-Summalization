@@ -7,13 +7,22 @@ from src.prompting import ANSWER_PROFILE_FACT, ANSWER_PROFILE_LIST
 from src.retrieval import (
     ReferenceSelectionConfig,
     build_generation_context,
+    compute_arbiter_metrics,
     compress_evidence,
     rewrite_query_heuristic,
     select_references_from_retrieved,
+    select_references_with_diagnostics,
 )
 
 
 class RetrievalTests(unittest.TestCase):
+    class StubGenerator:
+        def __init__(self, refs):
+            self.refs = refs
+
+        def arbitrate_references(self, query, candidate_paragraphs, *, profile, rule_refs, max_seq_len=None):
+            return self.refs
+
     def test_dynamic_ref_selection_keeps_single_fact_ref(self):
         retrieved = [
             {"para_id": "P1", "score": 0.95, "selection_score": 0.95, "text": "ประธานชี้แจงต่อที่ประชุม"},
@@ -51,6 +60,63 @@ class RetrievalTests(unittest.TestCase):
         ]
         refs = select_references_from_retrieved(retrieved, n=3, mode="fixed")
         self.assertEqual(refs, ["P1", "P2", "P3"])
+
+    def test_llm_ref_arbiter_uses_candidate_subset(self):
+        retrieved = [
+            {"para_id": "P1", "score": 0.82, "selection_score": 0.82, "text": "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¸™à¸²à¸¢à¸ à¸"},
+            {"para_id": "P2", "score": 0.80, "selection_score": 0.80, "text": "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¸™à¸²à¸¢à¸‚ à¸‚"},
+            {"para_id": "P3", "score": 0.10, "selection_score": 0.10, "text": "à¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¸›à¸£à¸°à¸à¸­à¸š"},
+        ]
+        with patch("src.retrieval.config.ENABLE_LLM_REF_ARBITER", True), patch(
+            "src.retrieval.config.REF_ARBITER_TRIGGER_MODE", "always"
+        ):
+            result = select_references_with_diagnostics(
+                "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¹ƒà¸„à¸£",
+                retrieved,
+                profile=ANSWER_PROFILE_FACT,
+                mode="dynamic_rules_then_llm_arbiter",
+                generator=self.StubGenerator(["P2"]),
+            )
+        self.assertEqual(result.selected_refs, ["P2"])
+        self.assertTrue(result.arbiter_used)
+        self.assertFalse(result.arbiter_fallback)
+
+    def test_llm_ref_arbiter_falls_back_on_invalid_output(self):
+        retrieved = [
+            {"para_id": "P1", "score": 0.82, "selection_score": 0.82, "text": "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¸™à¸²à¸¢à¸ à¸"},
+            {"para_id": "P2", "score": 0.80, "selection_score": 0.80, "text": "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¸™à¸²à¸¢à¸‚ à¸‚"},
+        ]
+        with patch("src.retrieval.config.ENABLE_LLM_REF_ARBITER", True), patch(
+            "src.retrieval.config.REF_ARBITER_TRIGGER_MODE", "always"
+        ):
+            result = select_references_with_diagnostics(
+                "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¹ƒà¸„à¸£",
+                retrieved,
+                profile=ANSWER_PROFILE_FACT,
+                mode="dynamic_rules_then_llm_arbiter",
+                generator=self.StubGenerator(["P99"]),
+            )
+        self.assertEqual(result.selected_refs, result.rule_refs)
+        self.assertTrue(result.arbiter_fallback)
+
+    def test_compute_arbiter_metrics_reports_usage_and_fallback(self):
+        metrics = compute_arbiter_metrics(
+            [
+                select_references_with_diagnostics("", [], profile=ANSWER_PROFILE_FACT),
+                type("Selection", (), {
+                    "arbiter_triggered": True,
+                    "arbiter_used": True,
+                    "arbiter_fallback": False,
+                })(),
+                type("Selection", (), {
+                    "arbiter_triggered": True,
+                    "arbiter_used": True,
+                    "arbiter_fallback": True,
+                })(),
+            ]
+        )
+        self.assertGreater(metrics["arbiter_usage_rate"], 0.0)
+        self.assertGreater(metrics["arbiter_fallback_rate"], 0.0)
 
     def test_compress_evidence_for_fact_returns_shorter_context(self):
         paragraphs = [

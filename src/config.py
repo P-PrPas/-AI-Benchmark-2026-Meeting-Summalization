@@ -164,6 +164,22 @@ ENABLE_SYNTHESIS_FEW_SHOT = os.environ.get("CAMNET_ENABLE_SYNTHESIS_FEW_SHOT", "
     "false",
     "False",
 }
+ENABLE_LLM_REF_ARBITER = os.environ.get("CAMNET_ENABLE_LLM_REF_ARBITER", "0").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+REF_ARBITER_MAX_CANDIDATES = int(os.environ.get("CAMNET_REF_ARBITER_MAX_CANDIDATES", "3"))
+REF_ARBITER_TRIGGER_MODE = os.environ.get("CAMNET_REF_ARBITER_TRIGGER_MODE", "ambiguous_only").strip().lower()
+REF_ARBITER_MAX_NEW_TOKENS = int(os.environ.get("CAMNET_REF_ARBITER_MAX_NEW_TOKENS", "48"))
+ENABLE_FACT_ANSWER_REWRITE = os.environ.get("CAMNET_ENABLE_FACT_ANSWER_REWRITE", "0").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+FACT_REWRITE_MAX_NEW_TOKENS = int(os.environ.get("CAMNET_FACT_REWRITE_MAX_NEW_TOKENS", "96"))
+FACT_REWRITE_TRIGGER_CHARS = int(os.environ.get("CAMNET_FACT_REWRITE_TRIGGER_CHARS", "180"))
+FACT_REWRITE_MIN_SOURCE_OVERLAP = float(os.environ.get("CAMNET_FACT_REWRITE_MIN_SOURCE_OVERLAP", "0.50"))
 
 RETRIEVAL_TOP_K = int(os.environ.get("CAMNET_RETRIEVAL_TOP_K", "12"))
 RETRIEVAL_CANDIDATE_K = int(os.environ.get("CAMNET_RETRIEVAL_CANDIDATE_K", str(RETRIEVAL_TOP_K)))

@@ -10,12 +10,14 @@ from src.prompting import detect_answer_profile
 from src.reranker import load_reranker_if_available
 from src.retrieval import (
     build_generation_context,
+    compute_arbiter_metrics,
     compute_selected_reference_metrics,
+    compute_selected_reference_metrics_by_profile,
     compute_retrieval_metrics,
     needs_query_refinement,
     rerank_retrieved,
     rewrite_query_heuristic,
-    select_references_from_retrieved,
+    select_references_with_diagnostics,
 )
 from .common import (
     DEFAULT_ARTIFACT_NAME,
@@ -203,7 +205,10 @@ def main() -> None:
     dense_retrievals = []
     reranked_retrievals = []
     predicted_refs_list = []
+    rule_refs_list = []
+    selection_results = []
     predicted_profiles = {}
+    selection_by_id = {}
     retrieval_diagnostics = []
     effective_retrieval_top_k = max(
         args.retrieval_top_k,
@@ -246,12 +251,20 @@ def main() -> None:
         reranked_retrievals.append(retrieved)
         predicted_profile = generator.detect_profile(sample["query"], retrieved)
         predicted_profiles[sample["ID"]] = predicted_profile
-        predicted_refs = select_references_from_retrieved(
+        selection_result = select_references_with_diagnostics(
+            sample["query"],
             retrieved,
             profile=predicted_profile,
             n=args.reference_top_n,
+            mode="dynamic_rules_then_llm_arbiter" if runtime_config.ENABLE_LLM_REF_ARBITER else None,
+            generator=generator,
         )
+        predicted_refs = selection_result.selected_refs
+        rule_refs = selection_result.rule_refs
         predicted_refs_list.append(predicted_refs)
+        rule_refs_list.append(rule_refs)
+        selection_results.append(selection_result)
+        selection_by_id[sample["ID"]] = selection_result
         generation_paragraphs = build_generation_context(
             sample["query"],
             retrieved,
@@ -277,6 +290,11 @@ def main() -> None:
                 "ID": sample["ID"],
                 "profile": predicted_profile,
                 "predicted_refs": predicted_refs,
+                "rule_refs": rule_refs,
+                "arbiter_refs": selection_result.arbiter_refs,
+                "arbiter_triggered": selection_result.arbiter_triggered,
+                "arbiter_used": selection_result.arbiter_used,
+                "arbiter_fallback": selection_result.arbiter_fallback,
                 "dense_top_candidates": [
                     {
                         "para_id": item["para_id"],
@@ -313,9 +331,31 @@ def main() -> None:
     dense_metrics = compute_retrieval_metrics(gold_refs_list, dense_retrievals)
     reranked_metrics = compute_retrieval_metrics(gold_refs_list, reranked_retrievals)
     selected_metrics = compute_selected_reference_metrics(gold_refs_list, predicted_refs_list)
+    rule_selected_metrics = compute_selected_reference_metrics(gold_refs_list, rule_refs_list)
+    selected_profile_metrics = compute_selected_reference_metrics_by_profile(
+        gold_refs_list,
+        predicted_refs_list,
+        [predicted_profiles[sample["ID"]] for sample in val_raw_samples],
+    )
+    arbiter_metrics = compute_arbiter_metrics(selection_results)
+    arbiter_used_indices = [
+        index for index, result in enumerate(selection_results)
+        if result.arbiter_used and not result.arbiter_fallback
+    ]
+    if arbiter_used_indices:
+        arbiter_selected_metrics = compute_selected_reference_metrics(
+            [gold_refs_list[index] for index in arbiter_used_indices],
+            [predicted_refs_list[index] for index in arbiter_used_indices],
+        )
+        metrics["arbiter_selected_ref_iou"] = arbiter_selected_metrics["selected_ref_iou"]
+    else:
+        metrics["arbiter_selected_ref_iou"] = 0.0
     metrics.update({f"dense_{key}": value for key, value in dense_metrics.items()})
     metrics.update({f"reranked_{key}": value for key, value in reranked_metrics.items()})
     metrics.update(selected_metrics)
+    metrics.update({f"rule_{key}": value for key, value in rule_selected_metrics.items()})
+    metrics.update(selected_profile_metrics)
+    metrics.update(arbiter_metrics)
     metrics.update(reranked_metrics)
     answer_lengths = [len(row["abstractive"]) for row in prediction_rows]
     malformed = [
@@ -342,10 +382,13 @@ def main() -> None:
         gold_refs = set(sample["gold_refs"])
         answer = pred["abstractive"]
         detected_profile = predicted_profiles[sample["ID"]]
+        selection_result = selection_by_id[sample["ID"]]
         rouge_score = float(merged_row["rougeL"])
         ss_score = float(merged_row["SS-score"])
         if not gold_refs.intersection({item["para_id"] for item in retrieved[:10]}):
             failure_type = "retrieval_miss"
+        elif selection_result.arbiter_fallback:
+            failure_type = "arbiter_fallback"
         elif ss_score > 0.8 and rouge_score < 0.4:
             failure_type = "high_ss_low_rouge"
         elif sample["profile"] == "fact" and detected_profile == "synthesis":
@@ -370,6 +413,8 @@ def main() -> None:
                 "pred_answer": answer,
                 "gold_refs": sample["gold_refs"],
                 "pred_refs": sorted(predicted_refs),
+                "rule_refs": selection_result.rule_refs,
+                "arbiter_refs": selection_result.arbiter_refs,
                 "top_retrieved": [item["para_id"] for item in retrieved[:5]],
                 "gold_profile": sample["profile"],
                 "pred_profile": detected_profile,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Dict, List, Optional, Sequence
 
 import torch
@@ -12,9 +13,13 @@ from .prompting import (
     ANSWER_PROFILE_FACT,
     ANSWER_PROFILE_LIST,
     ANSWER_PROFILE_SYNTHESIS,
+    FACT_REWRITE_SYSTEM_PROMPT,
     NO_ANSWER_TEXT,
+    REF_ARBITER_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     answer_needs_retry,
+    build_fact_rewrite_prompt,
+    build_ref_arbiter_prompt,
     build_user_prompt,
     context_limit_for_profile,
     detect_answer_profile,
@@ -145,11 +150,13 @@ class Generator:
         *,
         decode_profile: DecodeProfile,
         max_seq_len: Optional[int] = None,
+        system_prompt: str | None = None,
     ) -> str:
         assert self.tokenizer is not None and self.model is not None
         messages = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+        active_system_prompt = self.system_prompt if system_prompt is None else system_prompt
+        if active_system_prompt:
+            messages.append({"role": "system", "content": active_system_prompt})
         messages.append({"role": "user", "content": prompt})
 
         text = self.tokenizer.apply_chat_template(
@@ -254,6 +261,8 @@ class Generator:
                 max_seq_len=max_seq_len,
             )
             sanitized = sanitize_generated_answer(raw_response)
+        if profile == ANSWER_PROFILE_FACT:
+            sanitized = self.rewrite_fact_answer(query, paragraphs, sanitized, max_seq_len=max_seq_len)
         return sanitized or NO_ANSWER_TEXT
 
     def _mock_generate(self, query: str, paragraphs: List[Dict]) -> str:
@@ -312,7 +321,104 @@ class Generator:
             for index, raw_response in zip(retry_indices, retry_outputs):
                 sanitized[index] = sanitize_generated_answer(raw_response)
 
+        if resolved_profile == ANSWER_PROFILE_FACT:
+            sanitized = [
+                self.rewrite_fact_answer(query, paragraphs, answer, max_seq_len=max_seq_len)
+                for query, paragraphs, answer in zip(queries, paragraphs_list, sanitized)
+            ]
+
         return [answer or NO_ANSWER_TEXT for answer in sanitized]
+
+    @staticmethod
+    def _tokenize_for_overlap(text: str) -> List[str]:
+        return re.findall(r"\w+", (text or "").lower(), flags=re.UNICODE)
+
+    def _source_overlap(self, answer: str, paragraphs: Sequence[Dict]) -> float:
+        answer_tokens = set(self._tokenize_for_overlap(answer))
+        if not answer_tokens:
+            return 0.0
+        evidence_tokens = set()
+        for paragraph in paragraphs:
+            evidence_tokens.update(self._tokenize_for_overlap(paragraph.get("text", "")))
+        if not evidence_tokens:
+            return 0.0
+        return len(answer_tokens & evidence_tokens) / max(1, len(answer_tokens))
+
+    def should_rewrite_fact_answer(self, query: str, paragraphs: Sequence[Dict], answer: str) -> bool:
+        if not config.ENABLE_FACT_ANSWER_REWRITE:
+            return False
+        answer = (answer or "").strip()
+        if not answer or answer == NO_ANSWER_TEXT:
+            return False
+        if len(answer) >= config.FACT_REWRITE_TRIGGER_CHARS:
+            return True
+        overlap = self._source_overlap(answer, paragraphs)
+        if overlap < config.FACT_REWRITE_MIN_SOURCE_OVERLAP:
+            return True
+        conjunction_count = sum(answer.count(token) for token in (" และ", " รวมทั้ง", " พร้อมทั้ง", " ซึ่ง"))
+        return conjunction_count >= 2
+
+    def rewrite_fact_answer(
+        self,
+        query: str,
+        paragraphs: Sequence[Dict],
+        answer: str,
+        *,
+        max_seq_len: Optional[int] = None,
+    ) -> str:
+        if not self.should_rewrite_fact_answer(query, paragraphs, answer):
+            return answer
+        prompt = build_fact_rewrite_prompt(query, list(paragraphs[:2]), answer)
+        raw_response = self._generate_once(
+            prompt,
+            decode_profile=DecodeProfile(
+                name="fact_rewrite",
+                max_new_tokens=config.FACT_REWRITE_MAX_NEW_TOKENS,
+                repetition_penalty=config.STRICT_REPETITION_PENALTY,
+            ),
+            max_seq_len=max_seq_len,
+            system_prompt=FACT_REWRITE_SYSTEM_PROMPT,
+        )
+        rewritten = sanitize_generated_answer(raw_response)
+        if not rewritten or rewritten == NO_ANSWER_TEXT:
+            return answer
+        return rewritten
+
+    def arbitrate_references(
+        self,
+        query: str,
+        candidate_paragraphs: Sequence[Dict],
+        *,
+        profile: str,
+        rule_refs: Sequence[str],
+        max_seq_len: Optional[int] = None,
+    ) -> List[str] | None:
+        if self.model is None or self.tokenizer is None:
+            return None
+        if not candidate_paragraphs:
+            return None
+        prompt = build_ref_arbiter_prompt(
+            query,
+            candidate_paragraphs,
+            profile=profile,
+            rule_refs=rule_refs,
+        )
+        raw_response = self._generate_once(
+            prompt,
+            decode_profile=DecodeProfile(
+                name="ref_arbiter",
+                max_new_tokens=config.REF_ARBITER_MAX_NEW_TOKENS,
+                repetition_penalty=config.STRICT_REPETITION_PENALTY,
+            ),
+            max_seq_len=max_seq_len,
+            system_prompt=REF_ARBITER_SYSTEM_PROMPT,
+        )
+        candidate_ids = {paragraph["para_id"] for paragraph in candidate_paragraphs}
+        parsed = []
+        for para_id in re.findall(r"\bP\d+\b", raw_response):
+            if para_id in candidate_ids and para_id not in parsed:
+                parsed.append(para_id)
+        return parsed or None
 
 
 class ThaiSummarizer:

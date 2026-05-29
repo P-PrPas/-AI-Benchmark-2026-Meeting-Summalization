@@ -42,6 +42,14 @@ SYNTHESIS_QUERY_HINTS = (
 )
 LIST_CONTEXT_HINTS = ("1.", "2.", "3.", "ได้แก่", "ประกอบด้วย", "ข้อเสนอแนะ", "ข้อสังเกต", "แนวทาง")
 TRAILING_FRAGMENT_MARKERS = ("...", "…", "คำตอบ:", "ตอบ:")
+REF_ARBITER_SYSTEM_PROMPT = (
+    "คุณเป็นผู้ช่วยเลือกเลขย่อหน้าที่จำเป็นต่อการอ้างอิงคำตอบจากเอกสาร "
+    "ให้เลือกเฉพาะ para_id จาก candidate ที่ให้มาเท่านั้น และห้ามอธิบายเหตุผล"
+)
+FACT_REWRITE_SYSTEM_PROMPT = (
+    "คุณเป็นผู้ช่วยปรับถ้อยคำคำตอบ factual ให้ตรงกับ evidence มากที่สุด "
+    "ห้ามเพิ่มข้อมูลใหม่ และให้คงชื่อคน หน่วยงาน วันที่ และตัวเลขตาม evidence"
+)
 
 SYSTEM_PROMPT = (
     "คุณเป็นผู้ช่วยตอบคำถามจากบันทึกการประชุมรัฐสภาไทย\n\n"
@@ -225,6 +233,10 @@ def build_user_prompt(
     examples = few_shot_examples_for_profile(profile)
     if examples:
         sections.append(examples)
+    extra_instructions = []
+    if profile == ANSWER_PROFILE_FACT:
+        extra_instructions.append("- สำหรับคำถาม factual ให้ใช้ถ้อยคำจาก evidence โดยตรงให้มากที่สุด และหลีกเลี่ยงการเรียบเรียงใหม่")
+        extra_instructions.append("- ถ้าคำตอบอยู่ในบรรทัดเดียวของ evidence อยู่แล้ว ให้ตอบสั้นและตรงตามข้อความนั้นก่อน")
     sections.append(
         "เอกสาร:\n"
         f"{context_text}\n\n"
@@ -232,10 +244,78 @@ def build_user_prompt(
         "- ข้อมูลด้านบนเรียงจากเกี่ยวข้องมากไปน้อย ให้ใช้เฉพาะข้อมูลที่ให้มาเท่านั้น\n"
         "- ถ้าคำตอบอยู่ในข้อมูลอ้างอิงข้อแรกอยู่แล้ว ให้ตอบจากข้อมูลอ้างอิงข้อแรกก่อน และใช้ข้อมูลอ้างอิงเพิ่มเติมเฉพาะเมื่อจำเป็น\n"
         "- ถ้าข้อมูลด้านบนยังไม่พอ ให้ตอบว่า ไม่พบข้อมูลในเอกสาร\n\n"
-        f"คำถาม:\n{query.strip()}\n\n"
-        "คำตอบ:\n"
+        + ("\n".join(extra_instructions) + "\n\n" if extra_instructions else "")
+        + f"คำถาม:\n{query.strip()}\n\n"
+        + "คำตอบ:\n"
     )
     return "\n\n".join(sections)
+
+
+def build_ref_arbiter_prompt(
+    query: str,
+    candidate_paragraphs: Sequence[Mapping[str, str]],
+    *,
+    profile: str,
+    rule_refs: Sequence[str],
+) -> str:
+    candidate_lines = []
+    for index, paragraph in enumerate(candidate_paragraphs, start=1):
+        candidate_lines.append(f"{index}. [{paragraph['para_id']}] {normalize_text(paragraph.get('text', ''))}")
+
+    if profile == ANSWER_PROFILE_FACT:
+        policy = (
+            "- ค่าเริ่มต้นให้เลือก 1 para_id\n"
+            "- เลือก para_id ที่สองได้เฉพาะเมื่ออีกย่อหน้าจำเป็นต่อคำตอบ factual จริง\n"
+        )
+    elif profile == ANSWER_PROFILE_LIST:
+        policy = (
+            "- ค่าเริ่มต้นให้เลือก 2 para_id ถ้าแต่ละย่อหน้าครอบคลุมคนละรายการ\n"
+            "- เลือก para_id ที่สามได้เมื่อมีรายการสำคัญอยู่ต่างย่อหน้าอย่างชัดเจน\n"
+        )
+    else:
+        policy = (
+            "- ค่าเริ่มต้นให้เลือก 2 para_id\n"
+            "- เลือก para_id ที่สามได้เมื่อแต่ละย่อหน้าครอบคลุมคนละส่วนของคำตอบสรุปอย่างจำเป็นจริง\n"
+        )
+
+    return (
+        "งาน: เลือก para_id สำหรับอ้างอิงคำตอบจาก candidate ที่ให้มา\n\n"
+        f"คำถาม:\n{query.strip()}\n\n"
+        "candidate paragraphs:\n"
+        + "\n".join(candidate_lines)
+        + "\n\n"
+        f"ข้อเสนอจาก rules เดิม: {','.join(rule_refs) if rule_refs else 'NONE'}\n\n"
+        "กติกา:\n"
+        "- ต้องเลือกเฉพาะ para_id ที่อยู่ใน candidate เท่านั้น\n"
+        "- ห้ามอธิบายเหตุผล ห้ามเขียนคำอื่น ห้ามเขียนประโยค\n"
+        "- ถ้าไม่แน่ใจ ให้ยึดข้อเสนอจาก rules เดิม\n"
+        + policy
+        + "\nรูปแบบคำตอบ: Pxx หรือ Pxx,Pyy หรือ Pxx,Pyy,Pzz"
+    )
+
+
+def build_fact_rewrite_prompt(
+    query: str,
+    evidence_paragraphs: Sequence[Mapping[str, str]],
+    draft_answer: str,
+) -> str:
+    evidence_lines = []
+    for index, paragraph in enumerate(evidence_paragraphs, start=1):
+        evidence_lines.append(f"{index}. [{paragraph['para_id']}] {normalize_text(paragraph.get('text', ''))}")
+    return (
+        "งาน: ปรับคำตอบ factual ให้ตรงกับ evidence มากที่สุด\n\n"
+        f"คำถาม:\n{query.strip()}\n\n"
+        "evidence:\n"
+        + "\n".join(evidence_lines)
+        + "\n\n"
+        f"draft answer:\n{draft_answer.strip()}\n\n"
+        "กติกา:\n"
+        "- ใช้ถ้อยคำจาก evidence ให้มากที่สุด\n"
+        "- ห้ามเพิ่มข้อมูลใหม่\n"
+        "- คงชื่อคน หน่วยงาน วันที่ และตัวเลขตาม evidence\n"
+        "- ตอบสั้น กระชับ และเป็นคำตอบสุดท้ายเท่านั้น\n\n"
+        "คำตอบ:\n"
+    )
 
 
 def _deduplicate_lines(text: str) -> str:

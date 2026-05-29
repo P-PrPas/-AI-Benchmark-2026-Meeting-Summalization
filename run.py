@@ -28,7 +28,7 @@ from src.retrieval import (
     rerank_retrieved,
     retrieval_candidate_count,
     rewrite_query_heuristic,
-    select_references_from_retrieved,
+    select_references_with_diagnostics,
     tokenize_for_overlap,
 )
 
@@ -57,8 +57,12 @@ def log_runtime_context():
     print(f"      EFFECTIVE_RETRIEVAL_CANDIDATE_K={retrieval_candidate_count()}")
     print(f"      USE_RERANKER={config.USE_RERANKER}")
     print(f"      ENABLE_DYNAMIC_REF_SELECTION={config.ENABLE_DYNAMIC_REF_SELECTION}")
+    print(f"      ENABLE_LLM_REF_ARBITER={config.ENABLE_LLM_REF_ARBITER}")
+    print(f"      REF_ARBITER_TRIGGER_MODE={config.REF_ARBITER_TRIGGER_MODE}")
+    print(f"      REF_ARBITER_MAX_CANDIDATES={config.REF_ARBITER_MAX_CANDIDATES}")
     print(f"      ENABLE_QUERY_REFINEMENT={config.ENABLE_QUERY_REFINEMENT}")
     print(f"      ENABLE_EVIDENCE_COMPRESSION={config.ENABLE_EVIDENCE_COMPRESSION}")
+    print(f"      ENABLE_FACT_ANSWER_REWRITE={config.ENABLE_FACT_ANSWER_REWRITE}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
     print(f"      EMBED_BATCH_SIZE={config.EMBED_BATCH_SIZE}")
     print(f"      RERANK_BATCH_SIZE={config.RERANK_BATCH_SIZE}")
@@ -354,7 +358,14 @@ def main():
                 if refined_reranked:
                     reranked = refined_reranked
         profile = detect_answer_profile(query, reranked)
-        refs = select_references_from_retrieved(reranked, profile=profile)
+        ref_selection = select_references_with_diagnostics(
+            query,
+            reranked,
+            profile=profile,
+            mode="dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else None,
+            generator=generator,
+        )
+        refs = ref_selection.selected_refs
         generation_paragraphs = build_generation_context(query, reranked, refs, profile)
 
         rows.append(

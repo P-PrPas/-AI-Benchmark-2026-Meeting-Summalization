@@ -24,7 +24,7 @@ from src.retrieval import (
     build_generation_context,
     rerank_retrieved,
     retrieval_candidate_count,
-    select_references_from_retrieved,
+    select_references_with_diagnostics,
 )
 
 
@@ -367,10 +367,11 @@ def build_augmented_training_samples(
     doc_embedding_index: dict[str, dict[str, Any]],
     embedder: Any,
     reranker: Any | None = None,
+    generator: Any | None = None,
     *,
     seed: int,
-    oracle_fraction: float = 0.5,
-    noisy_fraction: float = 0.3,
+    oracle_fraction: float = 0.85,
+    noisy_fraction: float = 0.15,
     synthetic_fraction: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     oracle_samples, missing_refs = build_raw_samples(queries, doc_lookup)
@@ -406,7 +407,13 @@ def build_augmented_training_samples(
                 for paragraph in missing_gold
             ]
         profile = detect_answer_profile(sample["query"], reranked)
-        selected_refs = select_references_from_retrieved(reranked, profile=profile)
+        selected_refs = select_references_with_diagnostics(
+            sample["query"],
+            reranked,
+            profile=profile,
+            mode="dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else None,
+            generator=generator,
+        ).selected_refs
         noisy_candidates.append(
             {
                 **sample,

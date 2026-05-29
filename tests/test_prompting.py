@@ -4,6 +4,8 @@ from src.prompting import (
     ANSWER_PROFILE_FACT,
     ANSWER_PROFILE_LIST,
     ANSWER_PROFILE_SYNTHESIS,
+    build_fact_rewrite_prompt,
+    build_ref_arbiter_prompt,
     build_user_prompt,
     detect_answer_profile,
     sanitize_generated_answer,
@@ -60,6 +62,29 @@ class PromptingTests(unittest.TestCase):
         prompt = build_user_prompt(paragraphs, "มีหน่วยงานใดบ้าง", profile=ANSWER_PROFILE_LIST)
         self.assertIn("1. ปลัดกระทรวงมหาดไทย", prompt)
         self.assertNotIn("สถานการณ์อุทกภัยในพื้นที่เริ่มคลี่คลายลง", prompt)
+
+    def test_build_ref_arbiter_prompt_lists_candidate_ids_only(self):
+        prompt = build_ref_arbiter_prompt(
+            "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¹ƒà¸„à¸£",
+            [
+                {"para_id": "P10", "text": "à¸›à¸£à¸°à¸˜à¸²à¸™à¸à¸²à¸£à¸›à¸£à¸°à¸Šà¸¸à¸¡à¸„à¸·à¸­à¸™à¸²à¸¢à¸ªà¸¡à¸Šà¸²à¸¢ à¹ƒà¸ˆà¸”à¸µ"},
+                {"para_id": "P11", "text": "à¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¸›à¸£à¸°à¸à¸­à¸š"},
+            ],
+            profile=ANSWER_PROFILE_FACT,
+            rule_refs=["P10"],
+        )
+        self.assertIn("[P10]", prompt)
+        self.assertIn("[P11]", prompt)
+        self.assertIn("Pxx,Pyy", prompt)
+
+    def test_build_fact_rewrite_prompt_includes_evidence_and_draft(self):
+        prompt = build_fact_rewrite_prompt(
+            "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¹ƒà¸„à¸£",
+            [{"para_id": "P10", "text": "à¸›à¸£à¸°à¸˜à¸²à¸™à¸à¸²à¸£à¸›à¸£à¸°à¸Šà¸¸à¸¡à¸„à¸·à¸­à¸™à¸²à¸¢à¸ªà¸¡à¸Šà¸²à¸¢ à¹ƒà¸ˆà¸”à¸µ"}],
+            "à¸›à¸£à¸°à¸˜à¸²à¸™à¸„à¸·à¸­à¸™à¸²à¸¢à¸ªà¸¡à¸Šà¸²à¸¢ à¹ƒà¸ˆà¸”à¸µ à¹à¸¥à¸°à¸”à¸³à¹€à¸™à¸´à¸™à¸à¸²à¸£à¸•à¹ˆà¸­",
+        )
+        self.assertIn("[P10]", prompt)
+        self.assertIn("draft answer", prompt)
 
 
 if __name__ == "__main__":
