@@ -21,6 +21,7 @@ from tqdm import tqdm
 from src import config
 from src.generator import Generator
 from src.prompting import detect_answer_profile
+from src.ref_selector import load_ref_selector_if_available
 from src.reranker import load_reranker_if_available
 from src.retrieval import (
     build_generation_context,
@@ -57,12 +58,14 @@ def log_runtime_context():
     print(f"      EFFECTIVE_RETRIEVAL_CANDIDATE_K={retrieval_candidate_count()}")
     print(f"      USE_RERANKER={config.USE_RERANKER}")
     print(f"      ENABLE_DYNAMIC_REF_SELECTION={config.ENABLE_DYNAMIC_REF_SELECTION}")
+    print(f"      ENABLE_LEARNED_REF_SELECTOR={config.ENABLE_LEARNED_REF_SELECTOR}")
     print(f"      ENABLE_LLM_REF_ARBITER={config.ENABLE_LLM_REF_ARBITER}")
     print(f"      REF_ARBITER_TRIGGER_MODE={config.REF_ARBITER_TRIGGER_MODE}")
     print(f"      REF_ARBITER_MAX_CANDIDATES={config.REF_ARBITER_MAX_CANDIDATES}")
     print(f"      ENABLE_QUERY_REFINEMENT={config.ENABLE_QUERY_REFINEMENT}")
     print(f"      ENABLE_EVIDENCE_COMPRESSION={config.ENABLE_EVIDENCE_COMPRESSION}")
     print(f"      ENABLE_FACT_ANSWER_REWRITE={config.ENABLE_FACT_ANSWER_REWRITE}")
+    print(f"      REF_SELECTOR_MODEL_PATH={config.REF_SELECTOR_MODEL_PATH}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
     print(f"      EMBED_BATCH_SIZE={config.EMBED_BATCH_SIZE}")
     print(f"      RERANK_BATCH_SIZE={config.RERANK_BATCH_SIZE}")
@@ -272,6 +275,21 @@ def load_reranker():
         return None
 
 
+def load_ref_selector():
+    print(f"[3/4] Loading ref selector from {config.REF_SELECTOR_MODEL_PATH} ...")
+    selector = load_ref_selector_if_available()
+    if selector is None or not config.ENABLE_LEARNED_REF_SELECTOR:
+        print("      [info] Learned ref selector disabled")
+        return None
+    try:
+        selector.load_model()
+        print("      Learned ref selector loaded successfully")
+        return selector
+    except Exception as exc:
+        print(f"      [warn] Failed to load ref selector: {exc}")
+        return None
+
+
 def main():
     os.makedirs(RESULT_DIR, exist_ok=True)
     log_runtime_context()
@@ -289,6 +307,7 @@ def main():
     embedder = load_embedder()
     generator = load_generator()
     reranker = load_reranker()
+    ref_selector = load_ref_selector()
 
     print("[3/4] Indexing documents ...")
     faiss_indices = {}
@@ -363,6 +382,7 @@ def main():
             reranked,
             profile=profile,
             mode="dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else None,
+            ref_selector=ref_selector if config.ENABLE_LEARNED_REF_SELECTOR else None,
             generator=generator,
         )
         refs = ref_selection.selected_refs

@@ -40,6 +40,20 @@ SYNTHESIS_QUERY_HINTS = (
     "สาระสำคัญ",
     "ภาพรวม",
 )
+FACT_QUERY_HINTS = (
+    "คือใคร",
+    "คืออะไร",
+    "คือที่ใด",
+    "คือที่ไหน",
+    "คือเมื่อใด",
+    "เมื่อใด",
+    "วันที่เท่าใด",
+    "วันใด",
+    "กี่",
+    "เท่าใด",
+    "ชื่ออะไร",
+    "ใครเป็น",
+)
 LIST_CONTEXT_HINTS = ("1.", "2.", "3.", "ได้แก่", "ประกอบด้วย", "ข้อเสนอแนะ", "ข้อสังเกต", "แนวทาง")
 TRAILING_FRAGMENT_MARKERS = ("...", "…", "คำตอบ:", "ตอบ:")
 REF_ARBITER_SYSTEM_PROMPT = (
@@ -157,6 +171,10 @@ def _is_numbered_text(text: str) -> bool:
     return bool(re.search(r"(?m)^\s*\d+\.", text or ""))
 
 
+def _count_numbered_markers(text: str) -> int:
+    return len(re.findall(r"(?<!\d)\d+\.", text or ""))
+
+
 def _query_contains_any(query: str, hints: Sequence[str]) -> bool:
     query_norm = normalize_text(query)
     return any(hint in query_norm for hint in hints)
@@ -168,15 +186,22 @@ def detect_answer_profile(
 ) -> str:
     query_norm = normalize_text(query)
     paragraphs = list(paragraphs or [])
-    context_text = "\n".join(normalize_text(p.get("text", "")) for p in paragraphs)
+    context_window = paragraphs[:2]
+    context_text = "\n".join(normalize_text(p.get("text", "")) for p in context_window)
     if _query_contains_any(query_norm, LIST_QUERY_HINTS):
         return ANSWER_PROFILE_LIST
     if _query_contains_any(query_norm, SYNTHESIS_QUERY_HINTS):
         return ANSWER_PROFILE_SYNTHESIS
-    if any(hint in context_text for hint in LIST_CONTEXT_HINTS) or any(
-        _is_numbered_text(p.get("text", "")) for p in paragraphs
-    ):
+    if _query_contains_any(query_norm, FACT_QUERY_HINTS):
+        return ANSWER_PROFILE_FACT
+    numbered_contexts = sum(1 for p in context_window if _is_numbered_text(p.get("text", "")))
+    strong_list_context = any(_count_numbered_markers(p.get("text", "")) >= 2 for p in context_window)
+    if strong_list_context or numbered_contexts >= 2 or query_norm.startswith(("รายชื่อ", "หน่วยงาน", "ประเด็น")):
         return ANSWER_PROFILE_LIST
+    if len(context_window) >= 2 and len(query_norm) > 18 and any(
+        hint in query_norm for hint in ("สาระสำคัญ", "ภาพรวม", "สรุป")
+    ):
+        return ANSWER_PROFILE_SYNTHESIS
     return ANSWER_PROFILE_FACT
 
 
@@ -237,6 +262,7 @@ def build_user_prompt(
     if profile == ANSWER_PROFILE_FACT:
         extra_instructions.append("- สำหรับคำถาม factual ให้ใช้ถ้อยคำจาก evidence โดยตรงให้มากที่สุด และหลีกเลี่ยงการเรียบเรียงใหม่")
         extra_instructions.append("- ถ้าคำตอบอยู่ในบรรทัดเดียวของ evidence อยู่แล้ว ให้ตอบสั้นและตรงตามข้อความนั้นก่อน")
+        extra_instructions.append("- ให้ตอบ 1 ประโยคเป็นค่าเริ่มต้น และคงลำดับ token ของชื่อคน วันที่ และตัวเลขให้ใกล้ evidence มากที่สุด")
     sections.append(
         "เอกสาร:\n"
         f"{context_text}\n\n"

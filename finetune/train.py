@@ -11,6 +11,7 @@ from pathlib import Path
 
 from src import config as runtime_config
 from src.generator import Generator
+from src.ref_selector import load_ref_selector_if_available
 from src.reranker import load_reranker_if_available
 
 from .common import (
@@ -117,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--oracle-fraction", type=float, default=0.85)
     parser.add_argument("--noisy-fraction", type=float, default=0.15)
     parser.add_argument("--synthetic-fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--enable-source-anchored-fact-targets",
+        action="store_true",
+        default=runtime_config.ENABLE_SOURCE_ANCHORED_FACT_TARGETS,
+    )
     return parser
 
 
@@ -153,6 +159,8 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
     print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
     print(f"  use_reranker={runtime_config.USE_RERANKER}")
+    print(f"  enable_learned_ref_selector={runtime_config.ENABLE_LEARNED_REF_SELECTOR}")
+    print(f"  ref_selector_model_path={runtime_config.REF_SELECTOR_MODEL_PATH}")
     print(f"  enable_llm_ref_arbiter={runtime_config.ENABLE_LLM_REF_ARBITER}")
     print(f"  ref_arbiter_trigger_mode={runtime_config.REF_ARBITER_TRIGGER_MODE}")
     print(f"  enable_fact_answer_rewrite={runtime_config.ENABLE_FACT_ANSWER_REWRITE}")
@@ -166,6 +174,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
         "  training_mix="
         f"oracle:{args.oracle_fraction} noisy:{args.noisy_fraction} synthetic:{args.synthetic_fraction}"
     )
+    print(f"  enable_source_anchored_fact_targets={args.enable_source_anchored_fact_targets}")
 
 
 def resolve_merge_dtype(torch_module, merge_dtype: str):
@@ -259,11 +268,18 @@ def main() -> None:
     reranker = load_reranker_if_available(args.rerank_model_name_or_path)
     if reranker is not None:
         reranker.load_model()
+    ref_selector = load_ref_selector_if_available()
+    if ref_selector is not None and runtime_config.ENABLE_LEARNED_REF_SELECTOR:
+        ref_selector.load_model()
     train_docs = [doc_lookup[doc_id] for doc_id in sorted(train_doc_ids)]
     train_doc_embedding_index = build_document_embedding_index(train_docs, embedder)
 
     if args.disable_training_augmentation:
-        train_raw_samples, train_missing_refs = build_raw_samples(train_queries, doc_lookup)
+        train_raw_samples, train_missing_refs = build_raw_samples(
+            train_queries,
+            doc_lookup,
+            use_source_anchored_fact_targets=args.enable_source_anchored_fact_targets,
+        )
         augmentation_counts = {"oracle": len(train_raw_samples), "noisy_retrieved": 0, "synthetic_style": 0}
     else:
         retrieval_generator = None
@@ -276,11 +292,13 @@ def main() -> None:
             train_doc_embedding_index,
             embedder,
             reranker=reranker,
+            ref_selector=ref_selector if runtime_config.ENABLE_LEARNED_REF_SELECTOR else None,
             generator=retrieval_generator,
             seed=args.seed,
             oracle_fraction=args.oracle_fraction,
             noisy_fraction=args.noisy_fraction,
             synthetic_fraction=args.synthetic_fraction,
+            use_source_anchored_fact_targets=args.enable_source_anchored_fact_targets,
         )
         if retrieval_generator is not None:
             del retrieval_generator

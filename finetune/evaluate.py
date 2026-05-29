@@ -3,16 +3,19 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections import Counter
 
 from src import config as runtime_config
 from src.generator import Generator
 from src.prompting import detect_answer_profile
+from src.ref_selector import load_ref_selector_if_available
 from src.reranker import load_reranker_if_available
 from src.retrieval import (
     build_generation_context,
     compute_arbiter_metrics,
     compute_selected_reference_metrics,
     compute_selected_reference_metrics_by_profile,
+    compute_selector_metrics,
     compute_retrieval_metrics,
     needs_query_refinement,
     rerank_retrieved,
@@ -193,6 +196,9 @@ def main() -> None:
     reranker = load_reranker_if_available(args.rerank_model_name_or_path)
     if reranker is not None:
         reranker.load_model()
+    ref_selector = load_ref_selector_if_available()
+    if ref_selector is not None and runtime_config.ENABLE_LEARNED_REF_SELECTOR:
+        ref_selector.load_model()
 
     doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
@@ -257,6 +263,7 @@ def main() -> None:
             profile=predicted_profile,
             n=args.reference_top_n,
             mode="dynamic_rules_then_llm_arbiter" if runtime_config.ENABLE_LLM_REF_ARBITER else None,
+            ref_selector=ref_selector if runtime_config.ENABLE_LEARNED_REF_SELECTOR else None,
             generator=generator,
         )
         predicted_refs = selection_result.selected_refs
@@ -291,7 +298,9 @@ def main() -> None:
                 "profile": predicted_profile,
                 "predicted_refs": predicted_refs,
                 "rule_refs": rule_refs,
+                "selector_refs": selection_result.selector_refs,
                 "arbiter_refs": selection_result.arbiter_refs,
+                "selector_used": selection_result.selector_used,
                 "arbiter_triggered": selection_result.arbiter_triggered,
                 "arbiter_used": selection_result.arbiter_used,
                 "arbiter_fallback": selection_result.arbiter_fallback,
@@ -338,6 +347,7 @@ def main() -> None:
         [predicted_profiles[sample["ID"]] for sample in val_raw_samples],
     )
     arbiter_metrics = compute_arbiter_metrics(selection_results)
+    selector_metrics = compute_selector_metrics(selection_results)
     arbiter_used_indices = [
         index for index, result in enumerate(selection_results)
         if result.arbiter_used and not result.arbiter_fallback
@@ -350,11 +360,21 @@ def main() -> None:
         metrics["arbiter_selected_ref_iou"] = arbiter_selected_metrics["selected_ref_iou"]
     else:
         metrics["arbiter_selected_ref_iou"] = 0.0
+    selector_used_indices = [index for index, result in enumerate(selection_results) if result.selector_used]
+    if selector_used_indices:
+        selector_selected_metrics = compute_selected_reference_metrics(
+            [gold_refs_list[index] for index in selector_used_indices],
+            [predicted_refs_list[index] for index in selector_used_indices],
+        )
+        metrics["selector_selected_ref_iou"] = selector_selected_metrics["selected_ref_iou"]
+    else:
+        metrics["selector_selected_ref_iou"] = 0.0
     metrics.update({f"dense_{key}": value for key, value in dense_metrics.items()})
     metrics.update({f"reranked_{key}": value for key, value in reranked_metrics.items()})
     metrics.update(selected_metrics)
     metrics.update({f"rule_{key}": value for key, value in rule_selected_metrics.items()})
     metrics.update(selected_profile_metrics)
+    metrics.update(selector_metrics)
     metrics.update(arbiter_metrics)
     metrics.update(reranked_metrics)
     answer_lengths = [len(row["abstractive"]) for row in prediction_rows]
@@ -368,6 +388,11 @@ def main() -> None:
     metrics["pred_answer_length_mean"] = float(pd.Series(answer_lengths).mean()) if answer_lengths else 0.0
     metrics["format_error_rate"] = len(malformed) / max(1, len(prediction_rows))
     metrics["effective_retrieval_top_k"] = float(effective_retrieval_top_k)
+    profile_counts = Counter(predicted_profiles.values())
+    total_profiles = max(1, len(predicted_profiles))
+    metrics["pred_profile_pct_fact"] = profile_counts.get("fact", 0) / total_profiles
+    metrics["pred_profile_pct_list"] = profile_counts.get("list", 0) / total_profiles
+    metrics["pred_profile_pct_synthesis"] = profile_counts.get("synthesis", 0) / total_profiles
     save_json(args.output_dir / "validation_metrics.json", metrics)
     save_json(args.output_dir / "retrieval_diagnostics.json", {"rows": retrieval_diagnostics})
 
@@ -414,6 +439,7 @@ def main() -> None:
                 "gold_refs": sample["gold_refs"],
                 "pred_refs": sorted(predicted_refs),
                 "rule_refs": selection_result.rule_refs,
+                "selector_refs": selection_result.selector_refs,
                 "arbiter_refs": selection_result.arbiter_refs,
                 "top_retrieved": [item["para_id"] for item in retrieved[:5]],
                 "gold_profile": sample["profile"],

@@ -86,6 +86,14 @@ class PromptingTests(unittest.TestCase):
         self.assertIn("[P10]", prompt)
         self.assertIn("draft answer", prompt)
 
+    def test_detect_answer_profile_keeps_fact_with_single_numbered_context(self):
+        paragraphs = [
+            {"para_id": "P1", "text": "1. à¸™à¸²à¸¢à¸ªà¸¡à¸Šà¸²à¸¢ à¹ƒà¸ˆà¸”à¸µ à¸—à¸³à¸«à¸™à¹‰à¸²à¸—à¸µà¹ˆà¸›à¸£à¸°à¸˜à¸²à¸™à¸à¸²à¸£à¸›à¸£à¸°à¸Šà¸¸à¸¡"},
+            {"para_id": "P2", "text": "à¸—à¸µà¹ˆà¸›à¸£à¸°à¸Šà¸¸à¸¡à¸”à¸³à¹€à¸™à¸´à¸™à¸£à¸²à¸¢à¸à¸²à¸£à¸•à¹ˆà¸­à¹„à¸›"},
+        ]
+        profile = detect_answer_profile("à¸›à¸£à¸°à¸˜à¸²à¸™à¸à¸²à¸£à¸›à¸£à¸°à¸Šà¸¸à¸¡à¸„à¸·à¸­à¹ƒà¸„à¸£", paragraphs)
+        self.assertEqual(profile, ANSWER_PROFILE_FACT)
+
 
 if __name__ == "__main__":
     unittest.main()

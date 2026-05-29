@@ -25,6 +25,7 @@ from src.retrieval import (
     rerank_retrieved,
     retrieval_candidate_count,
     select_references_with_diagnostics,
+    tokenize_for_overlap,
 )
 
 
@@ -194,6 +195,36 @@ def build_ranked_context_from_paragraphs(
     )
 
 
+def _sentence_split(text: str) -> list[str]:
+    return [part.strip() for part in re.split(r"(?<=[\.\?!…])\s+|\n+", text or "") if part.strip()]
+
+
+def _token_overlap_ratio(left: str, right: str) -> float:
+    left_tokens = set(tokenize_for_overlap(left))
+    right_tokens = set(tokenize_for_overlap(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, len(left_tokens))
+
+
+def build_source_anchored_fact_answer(
+    query: str,
+    gold_answer: str,
+    paragraphs: Sequence[dict[str, Any]],
+) -> str | None:
+    best_sentence = None
+    best_score = -1.0
+    for paragraph in paragraphs:
+        for sentence in _sentence_split(paragraph.get("text", "")):
+            score = (0.65 * _token_overlap_ratio(gold_answer, sentence)) + (0.35 * _token_overlap_ratio(query, sentence))
+            if score > best_score:
+                best_score = score
+                best_sentence = sentence
+    if best_sentence is None or best_score < config.SOURCE_ANCHORED_FACT_MIN_OVERLAP:
+        return None
+    return best_sentence.strip()
+
+
 def _query_subject_prefix(query: str) -> str:
     cleaned = re.sub(r"\s+", " ", query).strip().rstrip(" ?")
     suffixes = (
@@ -329,6 +360,8 @@ def synthesize_no_answer_samples(
 def build_raw_samples(
     queries: Sequence[dict[str, Any]],
     doc_lookup: dict[str, dict[str, Any]],
+    *,
+    use_source_anchored_fact_targets: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     samples: list[dict[str, Any]] = []
     missing_ref_records: list[dict[str, Any]] = []
@@ -338,6 +371,11 @@ def build_raw_samples(
             raise KeyError(f"doc_id {query['doc_id']} from query {query['ID']} is missing from docs")
         ordered_refs, missing_refs = ordered_ref_paragraphs(doc, query.get("refs", []))
         profile = detect_answer_profile(query["query"], ordered_refs)
+        gold_answer = query["abstractive"].strip()
+        if use_source_anchored_fact_targets and profile == ANSWER_PROFILE_FACT and ordered_refs:
+            source_anchored = build_source_anchored_fact_answer(query["query"], gold_answer, ordered_refs)
+            if source_anchored:
+                gold_answer = source_anchored
         if missing_refs:
             missing_ref_records.append({"ID": query["ID"], "missing_refs": missing_refs})
         samples.append(
@@ -345,7 +383,7 @@ def build_raw_samples(
                 "ID": query["ID"],
                 "doc_id": query["doc_id"],
                 "query": query["query"].strip(),
-                "answer": query["abstractive"].strip(),
+                "answer": gold_answer,
                 "context": build_ranked_context_from_paragraphs(
                     query["query"].strip(),
                     ordered_refs,
@@ -367,14 +405,20 @@ def build_augmented_training_samples(
     doc_embedding_index: dict[str, dict[str, Any]],
     embedder: Any,
     reranker: Any | None = None,
+    ref_selector: Any | None = None,
     generator: Any | None = None,
     *,
     seed: int,
     oracle_fraction: float = 0.85,
     noisy_fraction: float = 0.15,
     synthetic_fraction: float = 0.0,
+    use_source_anchored_fact_targets: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
-    oracle_samples, missing_refs = build_raw_samples(queries, doc_lookup)
+    oracle_samples, missing_refs = build_raw_samples(
+        queries,
+        doc_lookup,
+        use_source_anchored_fact_targets=use_source_anchored_fact_targets,
+    )
     total_oracle = len(oracle_samples)
     if total_oracle == 0:
         return oracle_samples, missing_refs, {"oracle": 0, "noisy_retrieved": 0, "synthetic_style": 0}
@@ -412,6 +456,7 @@ def build_augmented_training_samples(
             reranked,
             profile=profile,
             mode="dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else None,
+            ref_selector=ref_selector if config.ENABLE_LEARNED_REF_SELECTOR else None,
             generator=generator,
         ).selected_refs
         noisy_candidates.append(

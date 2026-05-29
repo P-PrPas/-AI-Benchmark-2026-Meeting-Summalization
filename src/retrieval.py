@@ -44,6 +44,13 @@ class ReferenceSelectionConfig:
     top3_min: float = config.REF_SELECTION_TOP3_MIN
     fact_max_gap: float = config.REF_SELECTION_FACT_MAX_GAP
     aggregate_max_gap: float = config.REF_SELECTION_AGG_MAX_GAP
+    fact_top2_min: float = config.REF_SELECTION_FACT_TOP2_MIN
+    list_top2_min: float = config.REF_SELECTION_LIST_TOP2_MIN
+    list_top3_min: float = config.REF_SELECTION_LIST_TOP3_MIN
+    synthesis_top2_min: float = config.REF_SELECTION_SYNTH_TOP2_MIN
+    synthesis_top3_min: float = config.REF_SELECTION_SYNTH_TOP3_MIN
+    list_max_gap: float = config.REF_SELECTION_LIST_MAX_GAP
+    synthesis_max_gap: float = config.REF_SELECTION_SYNTH_MAX_GAP
     low_confidence_top1: float = config.REF_SELECTION_LOW_CONFIDENCE
     max_entropy: float = config.QUERY_REFINEMENT_MAX_ENTROPY
 
@@ -52,7 +59,9 @@ class ReferenceSelectionConfig:
 class ReferenceSelectionResult:
     selected_refs: List[str]
     rule_refs: List[str]
+    selector_refs: List[str]
     arbiter_refs: List[str]
+    selector_used: bool
     arbiter_triggered: bool
     arbiter_used: bool
     arbiter_fallback: bool
@@ -310,6 +319,28 @@ def _selection_scores(retrieved: Sequence[Dict]) -> List[float]:
     return _softmax(scores[: max(config.REFERENCE_TOP_N_MAX, 4)])
 
 
+def _top2_min_for_profile(profile: str, calibration_config: ReferenceSelectionConfig) -> float:
+    if profile == ANSWER_PROFILE_FACT:
+        return calibration_config.fact_top2_min
+    if profile == ANSWER_PROFILE_SYNTHESIS:
+        return calibration_config.synthesis_top2_min
+    return calibration_config.list_top2_min
+
+
+def _top3_min_for_profile(profile: str, calibration_config: ReferenceSelectionConfig) -> float:
+    if profile == ANSWER_PROFILE_SYNTHESIS:
+        return calibration_config.synthesis_top3_min
+    return calibration_config.list_top3_min
+
+
+def _gap_limit_for_profile(profile: str, calibration_config: ReferenceSelectionConfig) -> float:
+    if profile == ANSWER_PROFILE_FACT:
+        return calibration_config.fact_max_gap
+    if profile == ANSWER_PROFILE_SYNTHESIS:
+        return calibration_config.synthesis_max_gap
+    return calibration_config.list_max_gap
+
+
 def _dynamic_rule_select(
     retrieved: Sequence[Dict],
     *,
@@ -323,19 +354,18 @@ def _dynamic_rule_select(
     limit = min(len(retrieved), n or calibration_config.max_refs)
     probs = _selection_scores(retrieved[:limit])
     selected = [retrieved[0]["para_id"]]
-    gap_limit = calibration_config.fact_max_gap if profile == ANSWER_PROFILE_FACT else calibration_config.aggregate_max_gap
+    gap_limit = _gap_limit_for_profile(profile, calibration_config)
+    top2_min = _top2_min_for_profile(profile, calibration_config)
+    top3_min = _top3_min_for_profile(profile, calibration_config)
 
     if limit >= 2:
         gap12 = probs[0] - probs[1]
-        if probs[1] >= calibration_config.top2_min and gap12 <= gap_limit:
+        if probs[1] >= top2_min and gap12 <= gap_limit:
             selected.append(retrieved[1]["para_id"])
     if limit >= 3 and profile in {ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS}:
         gap23 = probs[1] - probs[2] if len(probs) > 2 else 1.0
-        if probs[2] >= calibration_config.top3_min and gap23 <= gap_limit:
+        if probs[2] >= top3_min and gap23 <= gap_limit:
             selected.append(retrieved[2]["para_id"])
-    if limit >= 4 and profile == ANSWER_PROFILE_SYNTHESIS:
-        if probs[3] >= calibration_config.top3_min and probs[2] - probs[3] <= gap_limit:
-            selected.append(retrieved[3]["para_id"])
     return selected
 
 
@@ -416,6 +446,25 @@ def _apply_ref_arbiter(
     return valid_refs, True, False
 
 
+def _apply_learned_selector(
+    query: str,
+    retrieved: Sequence[Dict],
+    *,
+    profile: str,
+    rule_refs: Sequence[str],
+    ref_selector: Any | None = None,
+) -> tuple[List[str], bool]:
+    if ref_selector is None:
+        return list(rule_refs), False
+    prediction = ref_selector.predict(query, retrieved, profile)
+    selected = [retrieved[0]["para_id"]]
+    if len(retrieved) >= 2 and prediction.keep2:
+        selected.append(retrieved[1]["para_id"])
+    if len(retrieved) >= 3 and prediction.keep3 and profile in {ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS}:
+        selected.append(retrieved[2]["para_id"])
+    return selected, True
+
+
 def select_references_with_diagnostics(
     query: str,
     retrieved: Sequence[Dict],
@@ -424,6 +473,7 @@ def select_references_with_diagnostics(
     calibration_config: ReferenceSelectionConfig | None = None,
     n: int | None = None,
     mode: str | None = None,
+    ref_selector: Any | None = None,
     generator: Any | None = None,
 ) -> ReferenceSelectionResult:
     profile = profile or ANSWER_PROFILE_FACT
@@ -431,7 +481,9 @@ def select_references_with_diagnostics(
         return ReferenceSelectionResult(
             selected_refs=[],
             rule_refs=[],
+            selector_refs=[],
             arbiter_refs=[],
+            selector_used=False,
             arbiter_triggered=False,
             arbiter_used=False,
             arbiter_fallback=False,
@@ -441,10 +493,22 @@ def select_references_with_diagnostics(
     if mode:
         resolved_mode = mode.lower()
     elif config.ENABLE_DYNAMIC_REF_SELECTION:
-        resolved_mode = "dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else "dynamic_rules"
+        if config.ENABLE_LEARNED_REF_SELECTOR:
+            resolved_mode = "dynamic_rules_then_selector"
+        elif config.ENABLE_LLM_REF_ARBITER:
+            resolved_mode = "dynamic_rules_then_llm_arbiter"
+        else:
+            resolved_mode = "dynamic_rules"
     else:
         resolved_mode = "fixed"
-    if resolved_mode not in {"fixed", "dynamic_rules", "dynamic_rules_then_llm_arbiter", "dynamic", "dynamic_rules_then_arbiter"}:
+    if resolved_mode not in {
+        "fixed",
+        "dynamic_rules",
+        "dynamic_rules_then_selector",
+        "dynamic_rules_then_llm_arbiter",
+        "dynamic",
+        "dynamic_rules_then_arbiter",
+    }:
         raise ValueError(f"Unsupported reference selection mode: {resolved_mode}")
     if resolved_mode == "dynamic":
         resolved_mode = "dynamic_rules"
@@ -457,7 +521,9 @@ def select_references_with_diagnostics(
         return ReferenceSelectionResult(
             selected_refs=selected_refs,
             rule_refs=selected_refs,
+            selector_refs=[],
             arbiter_refs=[],
+            selector_used=False,
             arbiter_triggered=False,
             arbiter_used=False,
             arbiter_fallback=False,
@@ -475,7 +541,29 @@ def select_references_with_diagnostics(
         return ReferenceSelectionResult(
             selected_refs=rule_refs,
             rule_refs=rule_refs,
+            selector_refs=[],
             arbiter_refs=[],
+            selector_used=False,
+            arbiter_triggered=False,
+            arbiter_used=False,
+            arbiter_fallback=False,
+            profile=profile,
+        )
+    if resolved_mode == "dynamic_rules_then_selector":
+        selector_refs, selector_used = _apply_learned_selector(
+            query,
+            retrieved,
+            profile=profile,
+            rule_refs=rule_refs,
+            ref_selector=ref_selector,
+        )
+        final_refs = selector_refs if selector_used else rule_refs
+        return ReferenceSelectionResult(
+            selected_refs=final_refs,
+            rule_refs=rule_refs,
+            selector_refs=selector_refs if selector_used else [],
+            arbiter_refs=[],
+            selector_used=selector_used,
             arbiter_triggered=False,
             arbiter_used=False,
             arbiter_fallback=False,
@@ -491,7 +579,9 @@ def select_references_with_diagnostics(
         return ReferenceSelectionResult(
             selected_refs=rule_refs,
             rule_refs=rule_refs,
+            selector_refs=[],
             arbiter_refs=[],
+            selector_used=False,
             arbiter_triggered=False,
             arbiter_used=False,
             arbiter_fallback=False,
@@ -509,7 +599,9 @@ def select_references_with_diagnostics(
     return ReferenceSelectionResult(
         selected_refs=selected_refs,
         rule_refs=rule_refs,
+        selector_refs=[],
         arbiter_refs=arbiter_refs,
+        selector_used=False,
         arbiter_triggered=arbiter_triggered,
         arbiter_used=arbiter_used,
         arbiter_fallback=arbiter_fallback,
@@ -532,6 +624,7 @@ def select_references_from_retrieved(
         calibration_config=calibration_config,
         n=n,
         mode=mode,
+        ref_selector=None,
         generator=None,
     ).selected_refs
 
@@ -726,6 +819,14 @@ def compute_arbiter_metrics(selection_results: Sequence[ReferenceSelectionResult
         "arbiter_trigger_rate": triggered / total,
         "arbiter_usage_rate": used / total,
         "arbiter_fallback_rate": fallback / total,
+    }
+
+
+def compute_selector_metrics(selection_results: Sequence[ReferenceSelectionResult]) -> Dict[str, float]:
+    total = max(1, len(selection_results))
+    used = sum(1 for result in selection_results if result.selector_used)
+    return {
+        "selector_usage_rate": used / total,
     }
 
 
