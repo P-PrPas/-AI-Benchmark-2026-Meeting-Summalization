@@ -126,6 +126,12 @@ NO_ANSWER_FEW_SHOT_EXAMPLE = """ตัวอย่างที่ 99
 
 
 def few_shot_examples_for_profile(profile: str) -> str:
+    if profile == ANSWER_PROFILE_FACT and not config.ENABLE_FACT_FEW_SHOT:
+        return ""
+    if profile == ANSWER_PROFILE_LIST and not config.ENABLE_LIST_FEW_SHOT:
+        return ""
+    if profile == ANSWER_PROFILE_SYNTHESIS and not config.ENABLE_SYNTHESIS_FEW_SHOT:
+        return ""
     if profile == ANSWER_PROFILE_LIST:
         examples = [LIST_FEW_SHOT_EXAMPLES, NO_ANSWER_FEW_SHOT_EXAMPLE]
     elif profile == ANSWER_PROFILE_SYNTHESIS:
@@ -215,8 +221,11 @@ def build_user_prompt(
             context,
             primary_count=primary_count or context_limit_for_profile(profile),
         )
-    return (
-        f"{few_shot_examples_for_profile(profile)}\n\n"
+    sections = []
+    examples = few_shot_examples_for_profile(profile)
+    if examples:
+        sections.append(examples)
+    sections.append(
         "เอกสาร:\n"
         f"{context_text}\n\n"
         "คำสั่งเพิ่มเติม:\n"
@@ -226,6 +235,7 @@ def build_user_prompt(
         f"คำถาม:\n{query.strip()}\n\n"
         "คำตอบ:\n"
     )
+    return "\n\n".join(sections)
 
 
 def _deduplicate_lines(text: str) -> str:
@@ -269,10 +279,6 @@ def answer_needs_retry(raw_answer: str, sanitized_answer: str, profile: str) -> 
     sanitized_answer = (sanitized_answer or "").strip()
     if not sanitized_answer or sanitized_answer == NO_ANSWER_TEXT:
         return False
-    if re.search(r"\[P\d+\]", raw_answer):
-        return True
-    if re.search(r"^(?:คำตอบ|ตอบ)\s*[:：]", raw_answer):
-        return True
     if raw_answer.endswith(("...", "…")):
         return True
     if profile == ANSWER_PROFILE_FACT and len(sanitized_answer) > config.FACT_MAX_ANSWER_CHARS:

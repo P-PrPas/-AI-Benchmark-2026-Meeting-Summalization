@@ -1,0 +1,4 @@
+FROM scratch
+
+ARG MODEL_NAME
+COPY . /model/weights/${MODEL_NAME}/

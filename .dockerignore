@@ -1,9 +1,12 @@
 *
-!Dockerfile
 !.dockerignore
+!Dockerfile
+!Dockerfile.dev
+!Dockerfile.base
+!Dockerfile.model
+!Dockerfile.submit
+!Dockerfile.monolith
 !requirements.txt
 !run.py
 !src/
 !src/**
-!weight/
-!weight/**

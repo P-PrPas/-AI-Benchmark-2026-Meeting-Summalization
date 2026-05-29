@@ -170,14 +170,46 @@ def neural_rerank(
     return merged
 
 
+def should_apply_neural_rerank(
+    retrieved: Sequence[Dict],
+    *,
+    profile: str,
+    reranker,
+) -> bool:
+    if reranker is None or not retrieved:
+        return False
+    if not config.ENABLE_ADAPTIVE_RERANKING:
+        return True
+    if profile in {ANSWER_PROFILE_LIST, ANSWER_PROFILE_SYNTHESIS}:
+        return True
+
+    top_scores = [float(item.get("score", 0.0)) for item in retrieved[:5]]
+    if len(top_scores) < 2:
+        return False
+
+    top1 = top_scores[0]
+    top2 = top_scores[1]
+    entropy = normalized_score_entropy(top_scores)
+    if (
+        top1 >= config.ADAPTIVE_RERANK_FACT_TOP1_MIN
+        and (top1 - top2) >= config.ADAPTIVE_RERANK_FACT_MIN_GAP
+        and entropy <= config.ADAPTIVE_RERANK_FACT_MAX_ENTROPY
+    ):
+        return False
+    return True
+
+
 def rerank_retrieved(
     query: str,
     dense_retrieved: Sequence[Dict],
     *,
+    profile: str = ANSWER_PROFILE_FACT,
     reranker=None,
     rerank_top_k: int = config.RERANK_TOP_K,
 ) -> List[Dict]:
     hybrid = hybrid_rerank(query, dense_retrieved)
+    if not should_apply_neural_rerank(hybrid, profile=profile, reranker=reranker):
+        return hybrid
     return neural_rerank(query, hybrid, reranker, top_k=rerank_top_k)
 
 

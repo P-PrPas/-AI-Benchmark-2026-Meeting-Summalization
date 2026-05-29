@@ -60,7 +60,7 @@ def _resolve_model_dir() -> Path:
     if env_value:
         candidate = Path(env_value).expanduser()
     else:
-        candidate = Path("/project/zz991000-zdeva/zz991011/models")
+        candidate = _prefer_existing_path(Path("/model/weights"), PROJECT_ROOT / "weight")
     if not candidate.is_absolute():
         candidate = (PROJECT_ROOT / candidate).resolve()
     return candidate
@@ -90,6 +90,9 @@ def _resolve_embed_model_path(default_name: str) -> Path:
         if not candidate.is_absolute():
             candidate = (PROJECT_ROOT / candidate).resolve()
         return candidate
+    model_name = os.environ.get("CAMNET_EMBED_MODEL_NAME")
+    if model_name:
+        return MODEL_DIR / model_name
     return MODEL_DIR / default_name
 
 
@@ -101,6 +104,9 @@ def _resolve_rerank_model_path(default_name: str) -> Path:
         if not candidate.is_absolute():
             candidate = (PROJECT_ROOT / candidate).resolve()
         return candidate
+    model_name = os.environ.get("CAMNET_RERANK_MODEL_NAME")
+    if model_name:
+        return MODEL_DIR / model_name
     return MODEL_DIR / default_name
 
 
@@ -120,9 +126,9 @@ TEST_PATH = _resolve_path(
     "CAMNET_TEST_PATH",
     _discover_test_path(),
 )
-EMBED_MODEL_PATH = _resolve_embed_model_path("Qwen3-Embedding-8B")
-RERANK_MODEL_PATH = _resolve_rerank_model_path("Qwen3-Reranker-4B")
-LLM_MODEL_PATH = _resolve_model_path("typhoon2.5-qwen3-4b")
+EMBED_MODEL_PATH = _resolve_embed_model_path("bge-m3")
+RERANK_MODEL_PATH = _resolve_rerank_model_path("reranker_phase_b_v1_final_model")
+LLM_MODEL_PATH = _resolve_model_path("llm_best_run_c5_final_merged")
 
 EVAL_SAMPLE_DIR = _resolve_path("CAMNET_EVAL_SAMPLE_DIR", DATA_DIR / "eval_sample")
 SUBMISSION_PATH = _resolve_path(
@@ -139,6 +145,25 @@ PROGRESS_LIB = _resolve_path(
 )
 
 STARTUP_SLEEP_SECONDS = int(os.environ.get("CAMNET_STARTUP_SLEEP_SECONDS", "10"))
+EMBED_BATCH_SIZE = int(os.environ.get("CAMNET_EMBED_BATCH_SIZE", "128"))
+RERANK_BATCH_SIZE = int(os.environ.get("CAMNET_RERANK_BATCH_SIZE", "16"))
+RERANK_MAX_LENGTH = int(os.environ.get("CAMNET_RERANK_MAX_LENGTH", "2048"))
+GENERATOR_BATCH_SIZE = int(os.environ.get("CAMNET_GENERATOR_BATCH_SIZE", "4"))
+ENABLE_FACT_FEW_SHOT = os.environ.get("CAMNET_ENABLE_FACT_FEW_SHOT", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+ENABLE_LIST_FEW_SHOT = os.environ.get("CAMNET_ENABLE_LIST_FEW_SHOT", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+ENABLE_SYNTHESIS_FEW_SHOT = os.environ.get("CAMNET_ENABLE_SYNTHESIS_FEW_SHOT", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
 
 RETRIEVAL_TOP_K = int(os.environ.get("CAMNET_RETRIEVAL_TOP_K", "12"))
 RETRIEVAL_CANDIDATE_K = int(os.environ.get("CAMNET_RETRIEVAL_CANDIDATE_K", str(RETRIEVAL_TOP_K)))
@@ -146,6 +171,11 @@ RERANK_TOP_K = int(os.environ.get("CAMNET_RERANK_TOP_K", "20"))
 REFERENCE_TOP_N = int(os.environ.get("CAMNET_REFERENCE_TOP_N", "3"))
 REFERENCE_TOP_N_MAX = int(os.environ.get("CAMNET_REFERENCE_TOP_N_MAX", "4"))
 USE_RERANKER = os.environ.get("CAMNET_USE_RERANKER", "0").strip() not in {"0", "false", "False"}
+ENABLE_ADAPTIVE_RERANKING = os.environ.get("CAMNET_ENABLE_ADAPTIVE_RERANKING", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
 ENABLE_DYNAMIC_REF_SELECTION = os.environ.get("CAMNET_ENABLE_DYNAMIC_REF_SELECTION", "0").strip() not in {
     "0",
     "false",
@@ -186,3 +216,7 @@ REF_SELECTION_FACT_MAX_GAP = float(os.environ.get("CAMNET_REF_SELECTION_FACT_MAX
 REF_SELECTION_AGG_MAX_GAP = float(os.environ.get("CAMNET_REF_SELECTION_AGG_MAX_GAP", "0.24"))
 REF_SELECTION_LOW_CONFIDENCE = float(os.environ.get("CAMNET_REF_SELECTION_LOW_CONFIDENCE", "0.34"))
 QUERY_REFINEMENT_MAX_ENTROPY = float(os.environ.get("CAMNET_QUERY_REFINEMENT_MAX_ENTROPY", "0.92"))
+ADAPTIVE_RERANK_FACT_TOP1_MIN = float(os.environ.get("CAMNET_ADAPTIVE_RERANK_FACT_TOP1_MIN", "0.72"))
+ADAPTIVE_RERANK_FACT_MIN_GAP = float(os.environ.get("CAMNET_ADAPTIVE_RERANK_FACT_MIN_GAP", "0.18"))
+ADAPTIVE_RERANK_FACT_MAX_ENTROPY = float(os.environ.get("CAMNET_ADAPTIVE_RERANK_FACT_MAX_ENTROPY", "0.78"))
+PROGRESS_UPDATE_EVERY = int(os.environ.get("CAMNET_PROGRESS_UPDATE_EVERY", "10"))

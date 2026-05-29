@@ -94,8 +94,12 @@ def run_evaluation(sol_path: str, pred_path: str) -> dict:
     df['rougeL'] = [r['rougeL'].fmeasure for r in results]
 
     # SS-score
-    print("Computing SS-score with Qwen3-Embedding-8B...")
-    model = SentenceTransformer(str(config.EMBED_MODEL_PATH), device="cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Computing SS-score with {config.EMBED_MODEL_PATH.name}...")
+    model = SentenceTransformer(
+        str(config.EMBED_MODEL_PATH),
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        local_files_only=True,
+    )
     texts = df['abstractive_sol'].tolist() + df['abstractive_pred'].tolist()
 
     embeddings = model.encode(

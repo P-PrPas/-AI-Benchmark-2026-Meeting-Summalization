@@ -3,18 +3,23 @@ services:
     image: camnet-p
     build:
       context: .
+      dockerfile: Dockerfile.dev
       args:
         BASE_IMAGE: nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
-        CAMNET_LLM_MODEL_NAME: ${CAMNET_LLM_MODEL_NAME:-typhoon2-1b}
     platform: linux/amd64
     gpus: all
     environment:
       CAMNET_MODEL_DIR: /model/weights
-      CAMNET_LLM_MODEL_NAME: ${CAMNET_LLM_MODEL_NAME:-typhoon2-1b}
+      CAMNET_EMBED_MODEL_NAME: ${CAMNET_EMBED_MODEL_NAME:-bge-m3}
+      CAMNET_EMBED_MODEL_PATH: /model/weights/${CAMNET_EMBED_MODEL_NAME:-bge-m3}
+      CAMNET_RERANK_MODEL_NAME: ${CAMNET_RERANK_MODEL_NAME:-reranker_phase_b_v1_final_model}
+      CAMNET_RERANK_MODEL_PATH: /model/weights/${CAMNET_RERANK_MODEL_NAME:-reranker_phase_b_v1_final_model}
+      CAMNET_LLM_MODEL_NAME: ${CAMNET_LLM_MODEL_NAME:-llm_best_run_c5_final_merged}
       CAMNET_STARTUP_SLEEP_SECONDS: ${CAMNET_STARTUP_SLEEP_SECONDS:-10}
       CAMNET_TEST_PATH: /model/test/test_set.json
       CAMNET_OUTPUT_DIR: /result
       CAMNET_PROGRESS_LIB: /benchmark_lib/progress
+      CAMNET_USE_RERANKER: ${CAMNET_USE_RERANKER:-1}
     volumes:
       - ./weight:/model/weights:ro
       - ./data/test:/model/test:ro

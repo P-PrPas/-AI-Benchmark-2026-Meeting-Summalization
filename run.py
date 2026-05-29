@@ -60,6 +60,12 @@ def log_runtime_context():
     print(f"      ENABLE_QUERY_REFINEMENT={config.ENABLE_QUERY_REFINEMENT}")
     print(f"      ENABLE_EVIDENCE_COMPRESSION={config.ENABLE_EVIDENCE_COMPRESSION}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
+    print(f"      EMBED_BATCH_SIZE={config.EMBED_BATCH_SIZE}")
+    print(f"      RERANK_BATCH_SIZE={config.RERANK_BATCH_SIZE}")
+    print(f"      RERANK_MAX_LENGTH={config.RERANK_MAX_LENGTH}")
+    print(f"      ENABLE_FACT_FEW_SHOT={config.ENABLE_FACT_FEW_SHOT}")
+    print(f"      GENERATOR_BATCH_SIZE={config.GENERATOR_BATCH_SIZE}")
+    print(f"      PROGRESS_UPDATE_EVERY={config.PROGRESS_UPDATE_EVERY}")
 
 
 def normalize_dataset(data: dict) -> dict:
@@ -105,6 +111,54 @@ def call_progress(i: int):
         print(f"[WARN] progress signal failed at {i}: {exc}")
 
 
+def precompute_query_embeddings(embedder, queries: List[Dict]) -> Dict[str, np.ndarray]:
+    if embedder is None:
+        return {}
+
+    grouped: Dict[str, List[Dict]] = {}
+    for query_row in queries:
+        grouped.setdefault(query_row["doc_id"], []).append(query_row)
+
+    encoded: Dict[str, np.ndarray] = {}
+    for doc_id, doc_queries in grouped.items():
+        texts = [row["query"] for row in doc_queries]
+        try:
+            embeddings = encode(embedder, texts)
+        except Exception as exc:
+            print(f"      [warn] Failed to batch-encode queries for {doc_id}: {exc}")
+            continue
+        for query_row, embedding in zip(doc_queries, embeddings):
+            encoded[query_row["ID"]] = embedding
+    return encoded
+
+
+def generate_rows_in_batches(generator: Generator, prepared_rows: List[Dict], total: int) -> List[Dict]:
+    completed = 0
+    ordered_rows = {row["ID"]: row for row in prepared_rows}
+    for profile in ("fact", "list", "synthesis"):
+        profile_rows = [row for row in prepared_rows if row["profile"] == profile]
+        if not profile_rows:
+            continue
+        print(
+            f"      Generating {len(profile_rows)} {profile} answers "
+            f"in batches of {config.GENERATOR_BATCH_SIZE}"
+        )
+        for start in range(0, len(profile_rows), config.GENERATOR_BATCH_SIZE):
+            batch = profile_rows[start:start + config.GENERATOR_BATCH_SIZE]
+            outputs = generator.batch_generate(
+                [row["query"] for row in batch],
+                [row["generation_paragraphs"] for row in batch],
+                profile=profile,
+                max_seq_len=config.GENERATOR_MAX_SEQ_LEN,
+            )
+            for row, abstractive in zip(batch, outputs):
+                ordered_rows[row["ID"]]["abstractive"] = abstractive
+                completed += 1
+                if completed % max(1, config.PROGRESS_UPDATE_EVERY) == 0 or completed == total:
+                    call_progress(completed)
+    return [ordered_rows[row["ID"]] for row in prepared_rows]
+
+
 def load_data(path: str) -> dict:
     print(f"[1/4] Loading test data from {path} ...")
     last_error = None
@@ -148,7 +202,7 @@ def encode(model, texts: List[str]) -> np.ndarray:
         raise RuntimeError("Embedder is unavailable")
     return model.encode(
         texts,
-        batch_size=32,
+        batch_size=config.EMBED_BATCH_SIZE,
         normalize_embeddings=True,
         convert_to_tensor=False,
         show_progress_bar=False,
@@ -246,17 +300,20 @@ def main():
             print(f"      [warn] Failed to index {doc['doc_id']}: {exc}")
             faiss_indices[doc["doc_id"]] = None
 
-    print(f"[4/4] Running inference on {total} queries ...")
+    print("[3/4] Encoding query embeddings ...")
+    query_embeddings = precompute_query_embeddings(embedder, queries)
+
+    print(f"[4/4] Preparing inference inputs for {total} queries ...")
     rows = []
     effective_retrieval_top_k = retrieval_candidate_count(use_reranker=reranker is not None)
-    for i, query_row in enumerate(tqdm(queries, desc="Predicting"), start=1):
+    for query_row in tqdm(queries, desc="Retrieving"):
         query_id = query_row["ID"]
         doc_id = query_row["doc_id"]
         query = query_row["query"]
         paragraphs = doc_index.get(doc_id, [])
 
-        query_emb = None
-        if embedder is not None:
+        query_emb = query_embeddings.get(query_id)
+        if query_emb is None and embedder is not None:
             try:
                 query_emb = encode(embedder, [query])[0]
             except Exception as exc:
@@ -270,7 +327,13 @@ def main():
             effective_retrieval_top_k,
         )
         initial_profile = detect_answer_profile(query, dense_retrieved)
-        reranked = rerank_retrieved(query, dense_retrieved, reranker=reranker, rerank_top_k=config.RERANK_TOP_K)
+        reranked = rerank_retrieved(
+            query,
+            dense_retrieved,
+            profile=initial_profile,
+            reranker=reranker,
+            rerank_top_k=config.RERANK_TOP_K,
+        )
         if needs_query_refinement(reranked, initial_profile):
             refined_query = rewrite_query_heuristic(query)
             if refined_query != query:
@@ -284,6 +347,7 @@ def main():
                 refined_reranked = rerank_retrieved(
                     refined_query,
                     refined_dense,
+                    profile=initial_profile,
                     reranker=reranker,
                     rerank_top_k=config.RERANK_TOP_K,
                 )
@@ -292,23 +356,31 @@ def main():
         profile = detect_answer_profile(query, reranked)
         refs = select_references_from_retrieved(reranked, profile=profile)
         generation_paragraphs = build_generation_context(query, reranked, refs, profile)
-        abstractive = generator.generate(
-            query,
-            generation_paragraphs,
-            profile=profile,
-            max_seq_len=config.GENERATOR_MAX_SEQ_LEN,
-        )
 
         rows.append(
             {
                 "ID": query_id,
-                "abstractive": abstractive,
-                "refs": ",".join(refs),
+                "query": query,
+                "profile": profile,
+                "generation_paragraphs": generation_paragraphs,
+                "refs": refs,
+                "abstractive": None,
             }
         )
-        call_progress(i)
 
-    df = pd.DataFrame(rows)
+    print(f"[4/4] Generating answers on {total} queries ...")
+    rows = generate_rows_in_batches(generator, rows, total)
+
+    df = pd.DataFrame(
+        [
+            {
+                "ID": row["ID"],
+                "abstractive": row["abstractive"],
+                "refs": ",".join(row["refs"]),
+            }
+            for row in rows
+        ]
+    )
     df.to_csv(RESULT_PATH, index=False, encoding="utf-8")
     print(f"\nSaved {len(df)} rows -> {RESULT_PATH}")
     call_progress(total)

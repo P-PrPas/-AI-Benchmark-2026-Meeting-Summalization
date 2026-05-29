@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -76,6 +76,9 @@ class Generator:
             return
 
         print(f"Loading generator model from {model_path}...")
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         model_path = Path(model_path)
         if not model_path.exists():
             available = []
@@ -90,16 +93,22 @@ class Generator:
             trust_remote_code=True,
             local_files_only=True,
         )
+        self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        dtype = torch.float32
+        if torch.cuda.is_available():
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         self.model = AutoModelForCausalLM.from_pretrained(
             str(model_path),
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=dtype,
             device_map="auto" if torch.cuda.is_available() else None,
             trust_remote_code=True,
             local_files_only=True,
         )
         self.model.eval()
+        if getattr(self.model, "generation_config", None) is not None:
+            self.model.generation_config.use_cache = True
         print("Generator model loaded successfully")
 
     def detect_profile(self, query: str, paragraphs: List[Dict]) -> str:
@@ -170,6 +179,55 @@ class Generator:
             skip_special_tokens=True,
         )
 
+    def _generate_many(
+        self,
+        prompts: Sequence[str],
+        *,
+        decode_profile: DecodeProfile,
+        max_seq_len: Optional[int] = None,
+    ) -> List[str]:
+        assert self.tokenizer is not None and self.model is not None
+        if not prompts:
+            return []
+
+        rendered_prompts = []
+        for prompt in prompts:
+            messages = []
+            if self.system_prompt:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            rendered_prompts.append(
+                self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+
+        inputs = self.tokenizer(
+            rendered_prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self._resolve_max_seq_len(max_seq_len),
+        ).to(self.model.device)
+
+        with torch.inference_mode():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=decode_profile.max_new_tokens,
+                do_sample=decode_profile.do_sample,
+                repetition_penalty=decode_profile.repetition_penalty,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+        prompt_width = inputs.input_ids.shape[1]
+        return [
+            self.tokenizer.decode(output[prompt_width:], skip_special_tokens=True)
+            for output in outputs
+        ]
+
     def generate(
         self,
         query: str,
@@ -208,9 +266,53 @@ class Generator:
         self,
         queries: List[str],
         paragraphs_list: List[List[Dict]],
-        **kwargs,
+        *,
+        profile: str | None = None,
+        max_seq_len: Optional[int] = None,
     ) -> List[str]:
-        return [self.generate(q, p, **kwargs) for q, p in zip(queries, paragraphs_list)]
+        if self.model is None or self.tokenizer is None:
+            return [self._mock_generate(q, p) for q, p in zip(queries, paragraphs_list)]
+
+        resolved_profiles = [
+            profile or self.detect_profile(query, paragraphs)
+            for query, paragraphs in zip(queries, paragraphs_list)
+        ]
+        if not resolved_profiles:
+            return []
+        if len(set(resolved_profiles)) != 1:
+            return [
+                self.generate(query, paragraphs, profile=item_profile, max_seq_len=max_seq_len)
+                for query, paragraphs, item_profile in zip(queries, paragraphs_list, resolved_profiles)
+            ]
+
+        resolved_profile = resolved_profiles[0]
+        prompts = [
+            self.build_prompt(query, paragraphs, profile=resolved_profile)
+            for query, paragraphs in zip(queries, paragraphs_list)
+        ]
+        raw_responses = self._generate_many(
+            prompts,
+            decode_profile=DECODE_PROFILES[resolved_profile],
+            max_seq_len=max_seq_len,
+        )
+        sanitized = [sanitize_generated_answer(response) for response in raw_responses]
+
+        retry_indices = [
+            index
+            for index, (raw_response, clean_response) in enumerate(zip(raw_responses, sanitized))
+            if answer_needs_retry(raw_response, clean_response, resolved_profile)
+        ]
+        if retry_indices:
+            retry_prompts = [prompts[index] for index in retry_indices]
+            retry_outputs = self._generate_many(
+                retry_prompts,
+                decode_profile=STRICT_RETRY_PROFILE,
+                max_seq_len=max_seq_len,
+            )
+            for index, raw_response in zip(retry_indices, retry_outputs):
+                sanitized[index] = sanitize_generated_answer(raw_response)
+
+        return [answer or NO_ANSWER_TEXT for answer in sanitized]
 
 
 class ThaiSummarizer:

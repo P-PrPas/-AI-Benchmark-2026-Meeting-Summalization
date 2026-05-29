@@ -42,8 +42,8 @@ class NeuralReranker:
         self,
         model_path: str | None = None,
         *,
-        batch_size: int = 4,
-        max_length: int = 8192,
+        batch_size: int = config.RERANK_BATCH_SIZE,
+        max_length: int = config.RERANK_MAX_LENGTH,
         instruction: str | None = None,
     ) -> None:
         self.model_path = str(model_path or config.RERANK_MODEL_PATH)
@@ -61,6 +61,10 @@ class NeuralReranker:
         model_path = Path(self.model_path)
         if not model_path.exists():
             raise FileNotFoundError(f"Reranker model path not found: {model_path}")
+
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             str(model_path),
