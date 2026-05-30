@@ -15,6 +15,8 @@ REPO_ROOT="/project/zz991000-zdeva/zz991011/CAMNET_P"
 MODEL_ROOT="${CAMNET_MODEL_DIR:-/project/zz991000-zdeva/zz991011/models}"
 CACHE_ROOT="/project/zz991000-zdeva/zz991011/.cache"
 OUTPUT_DIR="${CAMNET_FINETUNE_OUTPUT_DIR:-$REPO_ROOT/artifacts/typhoon25_qwen3_4b_rag_qa_qlora}"
+EVAL_MODEL_PATH="${CAMNET_EVAL_MODEL_PATH:-$OUTPUT_DIR/final_merged}"
+EMBED_MODEL_PATH="${CAMNET_EMBED_MODEL_PATH:-$MODEL_ROOT/bge-m3}"
 CONDA_ENV_NAME="three_env"
 
 mkdir -p "$REPO_ROOT/logs" "$OUTPUT_DIR"
@@ -36,6 +38,9 @@ export CAMNET_ENABLE_LLM_REF_ARBITER="${CAMNET_ENABLE_LLM_REF_ARBITER:-0}"
 export CAMNET_ENABLE_QUERY_REFINEMENT="${CAMNET_ENABLE_QUERY_REFINEMENT:-0}"
 export CAMNET_ENABLE_EVIDENCE_COMPRESSION="${CAMNET_ENABLE_EVIDENCE_COMPRESSION:-0}"
 export CAMNET_ENABLE_FACT_ANSWER_REWRITE="${CAMNET_ENABLE_FACT_ANSWER_REWRITE:-0}"
+export CAMNET_FACT_MAX_NEW_TOKENS="${CAMNET_FACT_MAX_NEW_TOKENS:-96}"
+export CAMNET_FACT_MAX_ANSWER_CHARS="${CAMNET_FACT_MAX_ANSWER_CHARS:-220}"
+export CAMNET_STRICT_RETRY_MAX_NEW_TOKENS="${CAMNET_STRICT_RETRY_MAX_NEW_TOKENS:-72}"
 export CAMNET_REF_SELECTION_TOP2_MIN="${CAMNET_REF_SELECTION_TOP2_MIN:-0.35}"
 export CAMNET_REF_SELECTION_TOP3_MIN="${CAMNET_REF_SELECTION_TOP3_MIN:-0.30}"
 export CAMNET_REF_SELECTION_FACT_MAX_GAP="${CAMNET_REF_SELECTION_FACT_MAX_GAP:-0.08}"
@@ -44,13 +49,16 @@ export CAMNET_REF_SELECTION_AGG_MAX_GAP="${CAMNET_REF_SELECTION_AGG_MAX_GAP:-0.1
 echo "Job starts at: $(date)"
 echo "Running on node: $(hostname)"
 echo "Evaluate Model"
+echo "Eval model path: $EVAL_MODEL_PATH"
+echo "Embed model path: $EMBED_MODEL_PATH"
 
 conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate \
-  "$@" \
   --project-root "$REPO_ROOT" \
   --train-json-path "$REPO_ROOT/data/train/train_set.json" \
-  --embed-model-name-or-path "$MODEL_ROOT/bge-m3" \
+  --model-name-or-path "$EVAL_MODEL_PATH" \
+  --embed-model-name-or-path "$EMBED_MODEL_PATH" \
   --output-dir "$OUTPUT_DIR" \
-  --cache-dir "$CACHE_ROOT"
+  --cache-dir "$CACHE_ROOT" \
+  "$@"
 
 echo "Job finished at: $(date)"

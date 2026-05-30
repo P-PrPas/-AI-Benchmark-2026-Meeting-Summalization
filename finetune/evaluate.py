@@ -31,11 +31,13 @@ from .common import (
     LANTA_PROJECT_ROOT,
     SYSTEM_PROMPT,
     build_document_embedding_index,
+    build_split_metadata,
     build_raw_samples,
     cache_dir_as_str,
     configure_cache_env,
     ensure_local_model_exists,
     ensure_path_exists,
+    grouped_doc_split,
     filter_queries_by_ids,
     load_json,
     load_training_data,
@@ -61,11 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adapter-path")
     parser.add_argument("--embed-model-name-or-path", default=str(DEFAULT_EMBED_MODEL_PATH))
     parser.add_argument("--rerank-model-name-or-path")
+    parser.add_argument("--split-metadata-path")
     parser.add_argument("--output-dir")
     parser.add_argument("--cache-dir", default=str(LANTA_CACHE_ROOT))
     parser.add_argument("--max-seq-len", type=int, default=runtime_config.GENERATOR_MAX_SEQ_LEN)
     parser.add_argument("--retrieval-top-k", type=int, default=runtime_config.RETRIEVAL_CANDIDATE_K)
     parser.add_argument("--reference-top-n", type=int, default=runtime_config.REFERENCE_TOP_N)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--val-doc-ratio", type=float, default=0.2)
     return parser
 
 
@@ -82,6 +87,11 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         project_root=project_root,
     )
     args.cache_dir = resolve_path(args.cache_dir, project_root=project_root)
+    args.split_metadata_path = (
+        resolve_path(args.split_metadata_path, project_root=project_root)
+        if args.split_metadata_path
+        else None
+    )
     args.model_name_or_path = args.model_name_or_path or str(args.output_dir / "final_merged")
     args.rerank_model_name_or_path = args.rerank_model_name_or_path or os.environ.get("CAMNET_RERANK_MODEL_PATH")
     args.adapter_path = (
@@ -94,7 +104,10 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def validate_args(args: argparse.Namespace) -> None:
     ensure_path_exists(args.train_json_path, "Train JSON")
-    ensure_path_exists(args.output_dir / "split_metadata.json", "Split metadata")
+    if args.split_metadata_path is not None:
+        ensure_path_exists(args.split_metadata_path, "Split metadata")
+    elif (args.output_dir / "split_metadata.json").exists():
+        pass
     ensure_local_model_exists(args.model_name_or_path, "Model", project_root=args.project_root)
     if args.adapter_path is not None:
         ensure_path_exists(args.adapter_path, "Adapter directory")
@@ -116,7 +129,30 @@ def print_runtime_config(args: argparse.Namespace) -> None:
 
 def load_validation_queries(args: argparse.Namespace):
     docs, queries, doc_lookup = load_training_data(args.train_json_path)
-    split_metadata = load_json(args.output_dir / "split_metadata.json")
+    split_metadata_path = args.split_metadata_path or (args.output_dir / "split_metadata.json")
+    if split_metadata_path.exists():
+        split_metadata = load_json(split_metadata_path)
+    else:
+        train_queries, val_queries, train_doc_ids, val_doc_ids = grouped_doc_split(
+            queries,
+            args.val_doc_ratio,
+            args.seed,
+        )
+        split_metadata = build_split_metadata(
+            seed=args.seed,
+            val_ratio=args.val_doc_ratio,
+            train_doc_ids=train_doc_ids,
+            val_doc_ids=val_doc_ids,
+            train_queries=train_queries,
+            val_queries=val_queries,
+            dropped_train=[],
+            dropped_val=[],
+        )
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            save_json(split_metadata_path, split_metadata)
+        except OSError:
+            pass
     val_query_ids = split_metadata.get("val_query_ids") or []
     val_queries = filter_queries_by_ids(queries, val_query_ids)
     if not val_queries:
