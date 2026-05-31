@@ -263,6 +263,10 @@ class Generator:
             sanitized = sanitize_generated_answer(raw_response)
         if profile == ANSWER_PROFILE_FACT:
             sanitized = self.rewrite_fact_answer(query, paragraphs, sanitized, max_seq_len=max_seq_len)
+        if config.ENABLE_SEMI_EXTRACTIVE_COMPOSER:
+            from .semi_extractive import semi_extractive_compose
+
+            sanitized = semi_extractive_compose(query, paragraphs, profile, sanitized)
         return sanitized or NO_ANSWER_TEXT
 
     def _mock_generate(self, query: str, paragraphs: List[Dict]) -> str:
@@ -324,6 +328,14 @@ class Generator:
         if resolved_profile == ANSWER_PROFILE_FACT:
             sanitized = [
                 self.rewrite_fact_answer(query, paragraphs, answer, max_seq_len=max_seq_len)
+                for query, paragraphs, answer in zip(queries, paragraphs_list, sanitized)
+            ]
+
+        if config.ENABLE_SEMI_EXTRACTIVE_COMPOSER:
+            from .semi_extractive import semi_extractive_compose
+
+            sanitized = [
+                semi_extractive_compose(query, paragraphs, resolved_profile, answer)
                 for query, paragraphs, answer in zip(queries, paragraphs_list, sanitized)
             ]
 

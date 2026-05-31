@@ -20,6 +20,8 @@ from tqdm import tqdm
 
 from src import config
 from src.generator import Generator
+from src.candidate_expansion import expanded_retrieve_from_dense
+from src.evidence_set import load_evidence_set_selector_if_available
 from src.prompting import detect_answer_profile
 from src.ref_selector import load_ref_selector_if_available
 from src.reranker import load_reranker_if_available
@@ -65,7 +67,11 @@ def log_runtime_context():
     print(f"      ENABLE_QUERY_REFINEMENT={config.ENABLE_QUERY_REFINEMENT}")
     print(f"      ENABLE_EVIDENCE_COMPRESSION={config.ENABLE_EVIDENCE_COMPRESSION}")
     print(f"      ENABLE_FACT_ANSWER_REWRITE={config.ENABLE_FACT_ANSWER_REWRITE}")
+    print(f"      ENABLE_EXPANDED_CANDIDATES={config.ENABLE_EXPANDED_CANDIDATES}")
+    print(f"      ENABLE_EVIDENCE_SET_SELECTOR={config.ENABLE_EVIDENCE_SET_SELECTOR}")
+    print(f"      ENABLE_SEMI_EXTRACTIVE_COMPOSER={config.ENABLE_SEMI_EXTRACTIVE_COMPOSER}")
     print(f"      REF_SELECTOR_MODEL_PATH={config.REF_SELECTOR_MODEL_PATH}")
+    print(f"      EVIDENCE_SET_MODEL_PATH={config.EVIDENCE_SET_MODEL_PATH}")
     print(f"      REFERENCE_TOP_N={config.REFERENCE_TOP_N}")
     print(f"      EMBED_BATCH_SIZE={config.EMBED_BATCH_SIZE}")
     print(f"      RERANK_BATCH_SIZE={config.RERANK_BATCH_SIZE}")
@@ -281,6 +287,21 @@ def load_ref_selector():
     if selector is None or not config.ENABLE_LEARNED_REF_SELECTOR:
         print("      [info] Learned ref selector disabled")
         return None
+
+
+def load_evidence_selector():
+    print(f"[3/4] Loading evidence-set selector from {config.EVIDENCE_SET_MODEL_PATH} ...")
+    selector = load_evidence_set_selector_if_available()
+    if selector is None or not config.ENABLE_EVIDENCE_SET_SELECTOR:
+        print("      [info] Evidence-set selector disabled")
+        return None
+    try:
+        selector.load_model()
+        print("      Evidence-set selector loaded successfully")
+        return selector
+    except Exception as exc:
+        print(f"      [warn] Failed to load evidence-set selector: {exc}")
+        return None
     try:
         selector.load_model()
         print("      Learned ref selector loaded successfully")
@@ -308,6 +329,7 @@ def main():
     generator = load_generator()
     reranker = load_reranker()
     ref_selector = load_ref_selector()
+    evidence_selector = load_evidence_selector()
 
     print("[3/4] Indexing documents ...")
     faiss_indices = {}
@@ -329,6 +351,10 @@ def main():
     print(f"[4/4] Preparing inference inputs for {total} queries ...")
     rows = []
     effective_retrieval_top_k = retrieval_candidate_count(use_reranker=reranker is not None)
+    dense_retrieval_top_k = max(
+        effective_retrieval_top_k,
+        config.EXPANDED_DENSE_TOP_K if config.ENABLE_EXPANDED_CANDIDATES else 0,
+    )
     for query_row in tqdm(queries, desc="Retrieving"):
         query_id = query_row["ID"]
         doc_id = query_row["doc_id"]
@@ -347,8 +373,15 @@ def main():
             paragraphs,
             query_emb,
             query,
-            effective_retrieval_top_k,
+            dense_retrieval_top_k,
         )
+        if config.ENABLE_EXPANDED_CANDIDATES:
+            dense_retrieved = expanded_retrieve_from_dense(
+                query,
+                paragraphs,
+                dense_retrieved,
+                effective_retrieval_top_k,
+            )
         initial_profile = detect_answer_profile(query, dense_retrieved)
         reranked = rerank_retrieved(
             query,
@@ -365,8 +398,15 @@ def main():
                     paragraphs,
                     encode(embedder, [refined_query])[0] if embedder is not None else None,
                     refined_query,
-                    effective_retrieval_top_k,
+                    dense_retrieval_top_k,
                 )
+                if config.ENABLE_EXPANDED_CANDIDATES:
+                    refined_dense = expanded_retrieve_from_dense(
+                        refined_query,
+                        paragraphs,
+                        refined_dense,
+                        effective_retrieval_top_k,
+                    )
                 refined_reranked = rerank_retrieved(
                     refined_query,
                     refined_dense,
@@ -383,6 +423,7 @@ def main():
             profile=profile,
             mode="dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else None,
             ref_selector=ref_selector if config.ENABLE_LEARNED_REF_SELECTOR else None,
+            evidence_selector=evidence_selector if config.ENABLE_EVIDENCE_SET_SELECTOR else None,
             generator=generator,
         )
         refs = ref_selection.selected_refs

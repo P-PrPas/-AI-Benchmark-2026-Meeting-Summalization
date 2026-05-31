@@ -9,10 +9,12 @@ from src import config as runtime_config
 from src.generator import Generator
 from src.prompting import detect_answer_profile
 from src.ref_selector import load_ref_selector_if_available
+from src.evidence_set import load_evidence_set_selector_if_available
 from src.reranker import load_reranker_if_available
 from src.retrieval import (
     build_generation_context,
     compute_arbiter_metrics,
+    compute_evidence_set_metrics,
     compute_selected_reference_metrics,
     compute_selected_reference_metrics_by_profile,
     compute_selector_metrics,
@@ -123,6 +125,9 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, args.project_root)}")
     print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
     print(f"  use_reranker={runtime_config.USE_RERANKER}")
+    print(f"  expanded_candidates={runtime_config.ENABLE_EXPANDED_CANDIDATES}")
+    print(f"  evidence_set_selector={runtime_config.ENABLE_EVIDENCE_SET_SELECTOR}")
+    print(f"  semi_extractive_composer={runtime_config.ENABLE_SEMI_EXTRACTIVE_COMPOSER}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
 
@@ -235,6 +240,9 @@ def main() -> None:
     ref_selector = load_ref_selector_if_available()
     if ref_selector is not None and runtime_config.ENABLE_LEARNED_REF_SELECTOR:
         ref_selector.load_model()
+    evidence_selector = load_evidence_set_selector_if_available()
+    if evidence_selector is not None and runtime_config.ENABLE_EVIDENCE_SET_SELECTOR:
+        evidence_selector.load_model()
 
     doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
@@ -300,6 +308,7 @@ def main() -> None:
             n=args.reference_top_n,
             mode="dynamic_rules_then_llm_arbiter" if runtime_config.ENABLE_LLM_REF_ARBITER else None,
             ref_selector=ref_selector if runtime_config.ENABLE_LEARNED_REF_SELECTOR else None,
+            evidence_selector=evidence_selector if runtime_config.ENABLE_EVIDENCE_SET_SELECTOR else None,
             generator=generator,
         )
         predicted_refs = selection_result.selected_refs
@@ -335,8 +344,10 @@ def main() -> None:
                 "predicted_refs": predicted_refs,
                 "rule_refs": rule_refs,
                 "selector_refs": selection_result.selector_refs,
+                "evidence_refs": selection_result.evidence_refs,
                 "arbiter_refs": selection_result.arbiter_refs,
                 "selector_used": selection_result.selector_used,
+                "evidence_used": selection_result.evidence_used,
                 "arbiter_triggered": selection_result.arbiter_triggered,
                 "arbiter_used": selection_result.arbiter_used,
                 "arbiter_fallback": selection_result.arbiter_fallback,
@@ -384,6 +395,7 @@ def main() -> None:
     )
     arbiter_metrics = compute_arbiter_metrics(selection_results)
     selector_metrics = compute_selector_metrics(selection_results)
+    evidence_set_metrics = compute_evidence_set_metrics(selection_results)
     arbiter_used_indices = [
         index for index, result in enumerate(selection_results)
         if result.arbiter_used and not result.arbiter_fallback
@@ -405,12 +417,22 @@ def main() -> None:
         metrics["selector_selected_ref_iou"] = selector_selected_metrics["selected_ref_iou"]
     else:
         metrics["selector_selected_ref_iou"] = 0.0
+    evidence_used_indices = [index for index, result in enumerate(selection_results) if result.evidence_used]
+    if evidence_used_indices:
+        evidence_selected_metrics = compute_selected_reference_metrics(
+            [gold_refs_list[index] for index in evidence_used_indices],
+            [predicted_refs_list[index] for index in evidence_used_indices],
+        )
+        metrics["evidence_set_selected_ref_iou"] = evidence_selected_metrics["selected_ref_iou"]
+    else:
+        metrics["evidence_set_selected_ref_iou"] = 0.0
     metrics.update({f"dense_{key}": value for key, value in dense_metrics.items()})
     metrics.update({f"reranked_{key}": value for key, value in reranked_metrics.items()})
     metrics.update(selected_metrics)
     metrics.update({f"rule_{key}": value for key, value in rule_selected_metrics.items()})
     metrics.update(selected_profile_metrics)
     metrics.update(selector_metrics)
+    metrics.update(evidence_set_metrics)
     metrics.update(arbiter_metrics)
     metrics.update(reranked_metrics)
     answer_lengths = [len(row["abstractive"]) for row in prediction_rows]
@@ -476,6 +498,7 @@ def main() -> None:
                 "pred_refs": sorted(predicted_refs),
                 "rule_refs": selection_result.rule_refs,
                 "selector_refs": selection_result.selector_refs,
+                "evidence_refs": selection_result.evidence_refs,
                 "arbiter_refs": selection_result.arbiter_refs,
                 "top_retrieved": [item["para_id"] for item in retrieved[:5]],
                 "gold_profile": sample["profile"],

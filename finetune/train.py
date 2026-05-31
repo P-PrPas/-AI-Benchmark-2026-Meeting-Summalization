@@ -11,6 +11,7 @@ from pathlib import Path
 
 from src import config as runtime_config
 from src.generator import Generator
+from src.evidence_set import load_evidence_set_selector_if_available
 from src.ref_selector import load_ref_selector_if_available
 from src.reranker import load_reranker_if_available
 
@@ -161,6 +162,8 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  use_reranker={runtime_config.USE_RERANKER}")
     print(f"  enable_learned_ref_selector={runtime_config.ENABLE_LEARNED_REF_SELECTOR}")
     print(f"  ref_selector_model_path={runtime_config.REF_SELECTOR_MODEL_PATH}")
+    print(f"  enable_evidence_set_selector={runtime_config.ENABLE_EVIDENCE_SET_SELECTOR}")
+    print(f"  evidence_set_model_path={runtime_config.EVIDENCE_SET_MODEL_PATH}")
     print(f"  enable_llm_ref_arbiter={runtime_config.ENABLE_LLM_REF_ARBITER}")
     print(f"  ref_arbiter_trigger_mode={runtime_config.REF_ARBITER_TRIGGER_MODE}")
     print(f"  enable_fact_answer_rewrite={runtime_config.ENABLE_FACT_ANSWER_REWRITE}")
@@ -271,6 +274,9 @@ def main() -> None:
     ref_selector = load_ref_selector_if_available()
     if ref_selector is not None and runtime_config.ENABLE_LEARNED_REF_SELECTOR:
         ref_selector.load_model()
+    evidence_selector = load_evidence_set_selector_if_available()
+    if evidence_selector is not None and runtime_config.ENABLE_EVIDENCE_SET_SELECTOR:
+        evidence_selector.load_model()
     train_docs = [doc_lookup[doc_id] for doc_id in sorted(train_doc_ids)]
     train_doc_embedding_index = build_document_embedding_index(train_docs, embedder)
 
@@ -293,6 +299,7 @@ def main() -> None:
             embedder,
             reranker=reranker,
             ref_selector=ref_selector if runtime_config.ENABLE_LEARNED_REF_SELECTOR else None,
+            evidence_selector=evidence_selector if runtime_config.ENABLE_EVIDENCE_SET_SELECTOR else None,
             generator=retrieval_generator,
             seed=args.seed,
             oracle_fraction=args.oracle_fraction,

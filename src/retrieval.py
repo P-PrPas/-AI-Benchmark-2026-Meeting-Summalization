@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
@@ -66,6 +66,8 @@ class ReferenceSelectionResult:
     arbiter_used: bool
     arbiter_fallback: bool
     profile: str
+    evidence_refs: List[str] = field(default_factory=list)
+    evidence_used: bool = False
 
 
 def retrieval_candidate_count(*, use_reranker: bool | None = None) -> int:
@@ -465,6 +467,24 @@ def _apply_learned_selector(
     return selected, True
 
 
+def _apply_evidence_set_selector(
+    query: str,
+    retrieved: Sequence[Dict],
+    *,
+    profile: str,
+    rule_refs: Sequence[str],
+    evidence_selector: Any | None = None,
+) -> tuple[List[str], bool]:
+    if evidence_selector is None:
+        return list(rule_refs), False
+    prediction = evidence_selector.predict(query, retrieved, profile)
+    candidate_ids = {item["para_id"] for item in retrieved[:20]}
+    selected = [para_id for para_id in prediction.refs if para_id in candidate_ids]
+    if not selected:
+        return list(rule_refs), False
+    return selected, True
+
+
 def select_references_with_diagnostics(
     query: str,
     retrieved: Sequence[Dict],
@@ -474,6 +494,7 @@ def select_references_with_diagnostics(
     n: int | None = None,
     mode: str | None = None,
     ref_selector: Any | None = None,
+    evidence_selector: Any | None = None,
     generator: Any | None = None,
 ) -> ReferenceSelectionResult:
     profile = profile or ANSWER_PROFILE_FACT
@@ -493,7 +514,9 @@ def select_references_with_diagnostics(
     if mode:
         resolved_mode = mode.lower()
     elif config.ENABLE_DYNAMIC_REF_SELECTION:
-        if config.ENABLE_LEARNED_REF_SELECTOR:
+        if config.ENABLE_EVIDENCE_SET_SELECTOR:
+            resolved_mode = "dynamic_rules_then_evidence_set"
+        elif config.ENABLE_LEARNED_REF_SELECTOR:
             resolved_mode = "dynamic_rules_then_selector"
         elif config.ENABLE_LLM_REF_ARBITER:
             resolved_mode = "dynamic_rules_then_llm_arbiter"
@@ -505,6 +528,7 @@ def select_references_with_diagnostics(
         "fixed",
         "dynamic_rules",
         "dynamic_rules_then_selector",
+        "dynamic_rules_then_evidence_set",
         "dynamic_rules_then_llm_arbiter",
         "dynamic",
         "dynamic_rules_then_arbiter",
@@ -568,6 +592,28 @@ def select_references_with_diagnostics(
             arbiter_used=False,
             arbiter_fallback=False,
             profile=profile,
+        )
+    if resolved_mode == "dynamic_rules_then_evidence_set":
+        evidence_refs, evidence_used = _apply_evidence_set_selector(
+            query,
+            retrieved,
+            profile=profile,
+            rule_refs=rule_refs,
+            evidence_selector=evidence_selector,
+        )
+        final_refs = evidence_refs if evidence_used else rule_refs
+        return ReferenceSelectionResult(
+            selected_refs=final_refs,
+            rule_refs=rule_refs,
+            selector_refs=[],
+            arbiter_refs=[],
+            selector_used=False,
+            arbiter_triggered=False,
+            arbiter_used=False,
+            arbiter_fallback=False,
+            profile=profile,
+            evidence_refs=evidence_refs if evidence_used else [],
+            evidence_used=evidence_used,
         )
 
     arbiter_triggered = _should_trigger_ref_arbiter(
@@ -827,6 +873,14 @@ def compute_selector_metrics(selection_results: Sequence[ReferenceSelectionResul
     used = sum(1 for result in selection_results if result.selector_used)
     return {
         "selector_usage_rate": used / total,
+    }
+
+
+def compute_evidence_set_metrics(selection_results: Sequence[ReferenceSelectionResult]) -> Dict[str, float]:
+    total = max(1, len(selection_results))
+    used = sum(1 for result in selection_results if result.evidence_used)
+    return {
+        "evidence_set_usage_rate": used / total,
     }
 
 

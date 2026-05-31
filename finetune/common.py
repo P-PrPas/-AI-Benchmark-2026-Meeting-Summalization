@@ -27,6 +27,7 @@ from src.retrieval import (
     select_references_with_diagnostics,
     tokenize_for_overlap,
 )
+from src.candidate_expansion import expanded_retrieve_paragraphs
 
 
 LANTA_PROJECT_ROOT = Path("/project/zz991000-zdeva/zz991011/CAMNET_P")
@@ -406,6 +407,7 @@ def build_augmented_training_samples(
     embedder: Any,
     reranker: Any | None = None,
     ref_selector: Any | None = None,
+    evidence_selector: Any | None = None,
     generator: Any | None = None,
     *,
     seed: int,
@@ -457,6 +459,7 @@ def build_augmented_training_samples(
             profile=profile,
             mode="dynamic_rules_then_llm_arbiter" if config.ENABLE_LLM_REF_ARBITER else None,
             ref_selector=ref_selector if config.ENABLE_LEARNED_REF_SELECTOR else None,
+            evidence_selector=evidence_selector if config.ENABLE_EVIDENCE_SET_SELECTOR else None,
             generator=generator,
         ).selected_refs
         noisy_candidates.append(
@@ -732,6 +735,9 @@ def retrieve_paragraphs(
     top_k: int,
 ) -> list[dict[str, Any]]:
     import numpy as np
+
+    if config.ENABLE_EXPANDED_CANDIDATES:
+        return expanded_retrieve_paragraphs(doc_embedding_index, doc_id, query, embedder, top_k)
 
     payload = doc_embedding_index[doc_id]
     query_embedding = embedder.encode(
