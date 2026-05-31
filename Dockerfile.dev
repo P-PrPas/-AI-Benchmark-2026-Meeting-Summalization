@@ -13,6 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CAMNET_EMBED_MODEL_PATH=/model/weights/bge-m3 \
     CAMNET_RERANK_MODEL_NAME=reranker_phase_b_v1_final_model \
     CAMNET_RERANK_MODEL_PATH=/model/weights/reranker_phase_b_v1_final_model \
+    CAMNET_EVIDENCE_SET_MODEL_PATH=/model/weights/evidence_set_rerank_on_v1/evidence_set.pkl \
     CAMNET_LLM_MODEL_NAME=llm_best_run_c5_final_merged \
     CAMNET_TEST_PATH=/model/test/test_set.json \
     CAMNET_OUTPUT_DIR=/result \
@@ -20,6 +21,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CAMNET_STARTUP_SLEEP_SECONDS=10 \
     CAMNET_USE_RERANKER=1 \
     CAMNET_ENABLE_DYNAMIC_REF_SELECTION=1 \
+    CAMNET_ENABLE_EVIDENCE_SET_SELECTOR=1 \
+    CAMNET_ENABLE_ANSWER_CANDIDATES=0 \
     CAMNET_ENABLE_QUERY_REFINEMENT=0 \
     CAMNET_ENABLE_EVIDENCE_COMPRESSION=0
 

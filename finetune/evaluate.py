@@ -6,6 +6,7 @@ import sys
 from collections import Counter
 
 from src import config as runtime_config
+from src.answer_candidates import select_heuristic_candidate
 from src.generator import Generator
 from src.prompting import detect_answer_profile
 from src.ref_selector import load_ref_selector_if_available
@@ -47,6 +48,7 @@ from .common import (
     resolve_path,
     run_evaluation,
     save_json,
+    tokenize_thai,
     retrieve_paragraphs,
 )
 
@@ -128,6 +130,8 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  expanded_candidates={runtime_config.ENABLE_EXPANDED_CANDIDATES}")
     print(f"  evidence_set_selector={runtime_config.ENABLE_EVIDENCE_SET_SELECTOR}")
     print(f"  semi_extractive_composer={runtime_config.ENABLE_SEMI_EXTRACTIVE_COMPOSER}")
+    print(f"  answer_candidates={runtime_config.ENABLE_ANSWER_CANDIDATES}")
+    print(f"  answer_candidate_selection_mode={runtime_config.ANSWER_CANDIDATE_SELECTION_MODE}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
 
@@ -174,6 +178,17 @@ def generate_prepared_rows_in_batches(
     *,
     max_seq_len: int,
 ) -> list[dict]:
+    oracle_scorer = None
+    if runtime_config.ENABLE_ANSWER_CANDIDATES and runtime_config.ANSWER_CANDIDATE_SELECTION_MODE == "oracle":
+        from rouge_score import rouge_scorer
+        from rouge_score.tokenizers import Tokenizer
+
+        class ThaiSpaceTokenizer(Tokenizer):
+            def tokenize(self, text: str) -> list[str]:
+                return text.split(" ")
+
+        oracle_scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=ThaiSpaceTokenizer())
+
     ordered_rows = {row["ID"]: row for row in prepared_rows}
     for profile in ("fact", "list", "synthesis"):
         profile_rows = [row for row in prepared_rows if row["profile"] == profile]
@@ -185,14 +200,46 @@ def generate_prepared_rows_in_batches(
         )
         for start in range(0, len(profile_rows), runtime_config.GENERATOR_BATCH_SIZE):
             batch = profile_rows[start:start + runtime_config.GENERATOR_BATCH_SIZE]
-            outputs = generator.batch_generate(
-                [row["query"] for row in batch],
-                [row["generation_paragraphs"] for row in batch],
-                profile=profile,
-                max_seq_len=max_seq_len,
-            )
-            for row, answer in zip(batch, outputs):
-                ordered_rows[row["ID"]]["abstractive"] = answer
+            queries = [row["query"] for row in batch]
+            paragraph_batches = [row["generation_paragraphs"] for row in batch]
+            if runtime_config.ENABLE_ANSWER_CANDIDATES:
+                candidate_batches = generator.batch_generate_candidates(
+                    queries,
+                    paragraph_batches,
+                    profile=profile,
+                    variants=runtime_config.ANSWER_CANDIDATE_VARIANTS,
+                    max_seq_len=max_seq_len,
+                )
+                for row, candidates in zip(batch, candidate_batches):
+                    mode = runtime_config.ANSWER_CANDIDATE_SELECTION_MODE
+                    if mode == "oracle" and oracle_scorer is not None:
+                        gold = tokenize_thai(row["gold_answer"])
+                        chosen = max(
+                            candidates,
+                            key=lambda item: oracle_scorer.score(gold, tokenize_thai(item["answer"]))["rougeL"].fmeasure,
+                        )
+                    elif mode == "heuristic":
+                        chosen = select_heuristic_candidate(
+                            row["query"],
+                            candidates,
+                            row["generation_paragraphs"],
+                            profile,
+                        )
+                    else:
+                        chosen = next((item for item in candidates if item["variant"] == "base"), candidates[0])
+                    ordered_rows[row["ID"]]["abstractive"] = chosen["answer"]
+                    ordered_rows[row["ID"]]["answer_variant"] = chosen["variant"]
+                    ordered_rows[row["ID"]]["answer_candidates"] = candidates
+            else:
+                outputs = generator.batch_generate(
+                    queries,
+                    paragraph_batches,
+                    profile=profile,
+                    max_seq_len=max_seq_len,
+                )
+                for row, answer in zip(batch, outputs):
+                    ordered_rows[row["ID"]]["abstractive"] = answer
+                    ordered_rows[row["ID"]]["answer_variant"] = "base"
     return [ordered_rows[row["ID"]] for row in prepared_rows]
 
 
@@ -357,6 +404,7 @@ def main() -> None:
                 "query": sample["query"],
                 "generation_paragraphs": generation_paragraphs,
                 "abstractive": None,
+                "gold_answer": sample["answer"],
                 "refs": ",".join(predicted_refs),
                 "profile": predicted_profile,
             }
@@ -409,7 +457,26 @@ def main() -> None:
     )
     pred_df = pd.DataFrame(prediction_rows)
     gold_df = pd.DataFrame(gold_rows)
-    pred_df.to_csv(args.output_dir / "val_predictions.csv", index=False, encoding="utf-8")
+    pred_df[["ID", "abstractive", "refs", "profile", "answer_variant"]].to_csv(
+        args.output_dir / "val_predictions.csv",
+        index=False,
+        encoding="utf-8",
+    )
+    if runtime_config.ENABLE_ANSWER_CANDIDATES:
+        save_json(
+            args.output_dir / "answer_candidates.json",
+            {
+                "rows": [
+                    {
+                        "ID": row["ID"],
+                        "profile": row["profile"],
+                        "chosen_variant": row.get("answer_variant", "base"),
+                        "candidates": row.get("answer_candidates", []),
+                    }
+                    for row in prediction_rows
+                ]
+            },
+        )
 
     metrics, merged = run_evaluation(gold_df, pred_df, embedder)
     gold_refs_list = [sample["gold_refs"] for sample in val_raw_samples]

@@ -1,16 +1,19 @@
 ARG BASE_IMAGE=camnet-deps-base:latest
 ARG EMBED_IMAGE=camnet-weight-embed:latest
 ARG RERANK_IMAGE=camnet-weight-rerank:latest
+ARG EVIDENCE_IMAGE=camnet-weight-evidence:latest
 ARG LLM_IMAGE=camnet-weight-llm:latest
 
 FROM ${EMBED_IMAGE} AS embed
 FROM ${RERANK_IMAGE} AS rerank
+FROM ${EVIDENCE_IMAGE} AS evidence
 FROM ${LLM_IMAGE} AS llm
 
 FROM ${BASE_IMAGE}
 
 ARG EMBED_MODEL_NAME=bge-m3
 ARG RERANK_MODEL_NAME=reranker_phase_b_v1_final_model
+ARG EVIDENCE_SET_MODEL_NAME=evidence_set_rerank_on_v1
 ARG CAMNET_LLM_MODEL_NAME=llm_best_run_c5_final_merged
 
 ENV CAMNET_MODEL_DIR=/model/weights \
@@ -18,6 +21,7 @@ ENV CAMNET_MODEL_DIR=/model/weights \
     CAMNET_EMBED_MODEL_PATH=/model/weights/${EMBED_MODEL_NAME} \
     CAMNET_RERANK_MODEL_NAME=${RERANK_MODEL_NAME} \
     CAMNET_RERANK_MODEL_PATH=/model/weights/${RERANK_MODEL_NAME} \
+    CAMNET_EVIDENCE_SET_MODEL_PATH=/model/weights/${EVIDENCE_SET_MODEL_NAME}/evidence_set.pkl \
     CAMNET_LLM_MODEL_NAME=${CAMNET_LLM_MODEL_NAME} \
     CAMNET_TEST_PATH=/model/test/test_set.json \
     CAMNET_OUTPUT_DIR=/result \
@@ -25,6 +29,8 @@ ENV CAMNET_MODEL_DIR=/model/weights \
     CAMNET_STARTUP_SLEEP_SECONDS=10 \
     CAMNET_USE_RERANKER=1 \
     CAMNET_ENABLE_DYNAMIC_REF_SELECTION=1 \
+    CAMNET_ENABLE_EVIDENCE_SET_SELECTOR=1 \
+    CAMNET_ENABLE_ANSWER_CANDIDATES=0 \
     CAMNET_ENABLE_LEARNED_REF_SELECTOR=0 \
     CAMNET_ENABLE_LLM_REF_ARBITER=0 \
     CAMNET_ENABLE_QUERY_REFINEMENT=0 \
@@ -37,6 +43,7 @@ ENV CAMNET_MODEL_DIR=/model/weights \
 
 COPY --from=embed /model/weights/${EMBED_MODEL_NAME} /model/weights/${EMBED_MODEL_NAME}
 COPY --from=rerank /model/weights/${RERANK_MODEL_NAME} /model/weights/${RERANK_MODEL_NAME}
+COPY --from=evidence /model/weights/${EVIDENCE_SET_MODEL_NAME} /model/weights/${EVIDENCE_SET_MODEL_NAME}
 COPY --from=llm /model/weights/${CAMNET_LLM_MODEL_NAME} /model/weights/${CAMNET_LLM_MODEL_NAME}
 
 COPY run.py /model/run.py

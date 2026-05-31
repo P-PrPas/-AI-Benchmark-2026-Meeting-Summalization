@@ -25,6 +25,7 @@ from .prompting import (
     detect_answer_profile,
     sanitize_generated_answer,
 )
+from .answer_candidates import build_candidate_prompt
 
 
 @dataclass(frozen=True)
@@ -340,6 +341,50 @@ class Generator:
             ]
 
         return [answer or NO_ANSWER_TEXT for answer in sanitized]
+
+    def batch_generate_candidates(
+        self,
+        queries: List[str],
+        paragraphs_list: List[List[Dict]],
+        *,
+        profile: str,
+        variants: Sequence[str],
+        max_seq_len: Optional[int] = None,
+    ) -> List[List[Dict[str, str]]]:
+        if not variants:
+            variants = ["base"]
+        if self.model is None or self.tokenizer is None:
+            return [
+                [{"variant": variant, "answer": self._mock_generate(query, paragraphs)} for variant in variants]
+                for query, paragraphs in zip(queries, paragraphs_list)
+            ]
+
+        per_variant_outputs: Dict[str, List[str]] = {}
+        for variant in variants:
+            prompts = [
+                build_candidate_prompt(self.build_prompt(query, paragraphs, profile=profile), variant, profile)
+                for query, paragraphs in zip(queries, paragraphs_list)
+            ]
+            raw_outputs = self._generate_many(
+                prompts,
+                decode_profile=DECODE_PROFILES[profile],
+                max_seq_len=max_seq_len,
+            )
+            per_variant_outputs[variant] = [sanitize_generated_answer(output) or NO_ANSWER_TEXT for output in raw_outputs]
+
+        results: List[List[Dict[str, str]]] = []
+        for index in range(len(queries)):
+            row_candidates = []
+            seen = set()
+            for variant in variants:
+                answer = per_variant_outputs[variant][index]
+                key = answer.strip()
+                if key in seen:
+                    continue
+                seen.add(key)
+                row_candidates.append({"variant": variant, "answer": answer})
+            results.append(row_candidates)
+        return results
 
     @staticmethod
     def _tokenize_for_overlap(text: str) -> List[str]:

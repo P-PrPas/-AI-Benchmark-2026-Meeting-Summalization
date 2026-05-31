@@ -9,10 +9,12 @@ FINAL_LOCAL_NAME="${FINAL_LOCAL_NAME:-camnet-p}"
 BASE_LOCAL_IMAGE="${BASE_LOCAL_IMAGE:-camnet-deps-base:latest}"
 EMBED_LOCAL_IMAGE="${EMBED_LOCAL_IMAGE:-camnet-weight-embed:latest}"
 RERANK_LOCAL_IMAGE="${RERANK_LOCAL_IMAGE:-camnet-weight-rerank:latest}"
+EVIDENCE_LOCAL_IMAGE="${EVIDENCE_LOCAL_IMAGE:-camnet-weight-evidence:latest}"
 LLM_LOCAL_IMAGE="${LLM_LOCAL_IMAGE:-camnet-weight-llm:latest}"
 
 EMBED_MODEL_NAME="${CAMNET_SUBMIT_EMBED_MODEL_NAME:-bge-m3}"
 RERANK_MODEL_NAME="${CAMNET_SUBMIT_RERANK_MODEL_NAME:-reranker_phase_b_v1_final_model}"
+EVIDENCE_SET_MODEL_NAME="${CAMNET_SUBMIT_EVIDENCE_SET_MODEL_NAME:-evidence_set_rerank_on_v1}"
 LLM_MODEL_NAME="${CAMNET_SUBMIT_LLM_MODEL_NAME:-llm_best_run_c5_final_merged}"
 
 if [ -z "$1" ]; then
@@ -52,11 +54,13 @@ echo "  CAMNET-P Submission Script"
 echo "  Final image : ${FULL_IMAGE}"
 echo "  Embed model : ${EMBED_MODEL_NAME}"
 echo "  Rerank model: ${RERANK_MODEL_NAME}"
+echo "  Evidence set: ${EVIDENCE_SET_MODEL_NAME}"
 echo "  LLM model   : ${LLM_MODEL_NAME}"
 echo "========================================"
 
 require_dir "weight/${EMBED_MODEL_NAME}"
 require_dir "weight/${RERANK_MODEL_NAME}"
+require_dir "weight/${EVIDENCE_SET_MODEL_NAME}"
 require_dir "weight/${LLM_MODEL_NAME}"
 
 echo ""
@@ -89,6 +93,15 @@ else
   echo "Skipping rerank model build: ${RERANK_LOCAL_IMAGE}"
 fi
 
+if should_rebuild "${EVIDENCE_LOCAL_IMAGE}" "${CAMNET_REBUILD_EVIDENCE:-0}"; then
+  docker build -f Dockerfile.model \
+    --build-arg MODEL_NAME=${EVIDENCE_SET_MODEL_NAME} \
+    -t ${EVIDENCE_LOCAL_IMAGE} \
+    weight/${EVIDENCE_SET_MODEL_NAME}
+else
+  echo "Skipping evidence-set build: ${EVIDENCE_LOCAL_IMAGE}"
+fi
+
 if should_rebuild "${LLM_LOCAL_IMAGE}" "${CAMNET_REBUILD_LLM:-0}"; then
   docker build -f Dockerfile.model \
     --build-arg MODEL_NAME=${LLM_MODEL_NAME} \
@@ -104,6 +117,8 @@ docker build \
   --build-arg EMBED_MODEL_NAME=${EMBED_MODEL_NAME} \
   --build-arg RERANK_IMAGE=${RERANK_LOCAL_IMAGE} \
   --build-arg RERANK_MODEL_NAME=${RERANK_MODEL_NAME} \
+  --build-arg EVIDENCE_IMAGE=${EVIDENCE_LOCAL_IMAGE} \
+  --build-arg EVIDENCE_SET_MODEL_NAME=${EVIDENCE_SET_MODEL_NAME} \
   --build-arg LLM_IMAGE=${LLM_LOCAL_IMAGE} \
   --build-arg CAMNET_LLM_MODEL_NAME=${LLM_MODEL_NAME} \
   -t ${FINAL_LOCAL_NAME} .

@@ -213,6 +213,17 @@ ENABLE_SEMI_EXTRACTIVE_COMPOSER = os.environ.get("CAMNET_ENABLE_SEMI_EXTRACTIVE_
 }
 SEMI_EXTRACTIVE_FACT_MIN_OVERLAP = float(os.environ.get("CAMNET_SEMI_EXTRACTIVE_FACT_MIN_OVERLAP", "0.35"))
 SEMI_EXTRACTIVE_MAX_SENTENCES = int(os.environ.get("CAMNET_SEMI_EXTRACTIVE_MAX_SENTENCES", "4"))
+ENABLE_ANSWER_CANDIDATES = os.environ.get("CAMNET_ENABLE_ANSWER_CANDIDATES", "0").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+ANSWER_CANDIDATE_SELECTION_MODE = os.environ.get("CAMNET_ANSWER_CANDIDATE_SELECTION_MODE", "base").strip().lower()
+ANSWER_CANDIDATE_VARIANTS = [
+    item.strip()
+    for item in os.environ.get("CAMNET_ANSWER_CANDIDATE_VARIANTS", "base,concise,gold_style,list_style").split(",")
+    if item.strip()
+]
 ENABLE_SOURCE_ANCHORED_FACT_TARGETS = os.environ.get("CAMNET_ENABLE_SOURCE_ANCHORED_FACT_TARGETS", "0").strip() not in {
     "0",
     "false",

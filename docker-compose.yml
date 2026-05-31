@@ -14,12 +14,15 @@ services:
       CAMNET_EMBED_MODEL_PATH: /model/weights/${CAMNET_EMBED_MODEL_NAME:-bge-m3}
       CAMNET_RERANK_MODEL_NAME: ${CAMNET_RERANK_MODEL_NAME:-reranker_phase_b_v1_final_model}
       CAMNET_RERANK_MODEL_PATH: /model/weights/${CAMNET_RERANK_MODEL_NAME:-reranker_phase_b_v1_final_model}
+      CAMNET_EVIDENCE_SET_MODEL_PATH: /model/weights/${CAMNET_EVIDENCE_SET_MODEL_NAME:-evidence_set_rerank_on_v1}/evidence_set.pkl
       CAMNET_LLM_MODEL_NAME: ${CAMNET_LLM_MODEL_NAME:-llm_best_run_c5_final_merged}
       CAMNET_STARTUP_SLEEP_SECONDS: ${CAMNET_STARTUP_SLEEP_SECONDS:-10}
       CAMNET_TEST_PATH: /model/test/test_set.json
       CAMNET_OUTPUT_DIR: /result
       CAMNET_PROGRESS_LIB: /benchmark_lib/progress
       CAMNET_USE_RERANKER: ${CAMNET_USE_RERANKER:-1}
+      CAMNET_ENABLE_EVIDENCE_SET_SELECTOR: ${CAMNET_ENABLE_EVIDENCE_SET_SELECTOR:-1}
+      CAMNET_ENABLE_ANSWER_CANDIDATES: ${CAMNET_ENABLE_ANSWER_CANDIDATES:-0}
     volumes:
       - ./weight:/model/weights:ro
       - ./data/test:/model/test:ro
