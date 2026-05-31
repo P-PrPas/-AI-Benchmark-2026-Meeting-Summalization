@@ -45,12 +45,14 @@ export CAMNET_REF_SELECTION_TOP2_MIN="${CAMNET_REF_SELECTION_TOP2_MIN:-0.35}"
 export CAMNET_REF_SELECTION_TOP3_MIN="${CAMNET_REF_SELECTION_TOP3_MIN:-0.30}"
 export CAMNET_REF_SELECTION_FACT_MAX_GAP="${CAMNET_REF_SELECTION_FACT_MAX_GAP:-0.08}"
 export CAMNET_REF_SELECTION_AGG_MAX_GAP="${CAMNET_REF_SELECTION_AGG_MAX_GAP:-0.12}"
+export CAMNET_RETRIEVAL_TOP_K="${CAMNET_RETRIEVAL_TOP_K:-20}"
 
 echo "Job starts at: $(date)"
 echo "Running on node: $(hostname)"
 echo "Evaluate Model"
 echo "Eval model path: $EVAL_MODEL_PATH"
 echo "Embed model path: $EMBED_MODEL_PATH"
+echo "Retrieval top-k: $CAMNET_RETRIEVAL_TOP_K"
 
 conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate \
   --project-root "$REPO_ROOT" \
@@ -59,6 +61,7 @@ conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate \
   --embed-model-name-or-path "$EMBED_MODEL_PATH" \
   --output-dir "$OUTPUT_DIR" \
   --cache-dir "$CACHE_ROOT" \
+  --retrieval-top-k "$CAMNET_RETRIEVAL_TOP_K" \
   "$@"
 
 echo "Job finished at: $(date)"
