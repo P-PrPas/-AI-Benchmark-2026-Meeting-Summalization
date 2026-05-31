@@ -168,6 +168,34 @@ def load_validation_queries(args: argparse.Namespace):
     return docs, val_docs, val_queries, val_raw_samples, missing_val_refs
 
 
+def generate_prepared_rows_in_batches(
+    generator: Generator,
+    prepared_rows: list[dict],
+    *,
+    max_seq_len: int,
+) -> list[dict]:
+    ordered_rows = {row["ID"]: row for row in prepared_rows}
+    for profile in ("fact", "list", "synthesis"):
+        profile_rows = [row for row in prepared_rows if row["profile"] == profile]
+        if not profile_rows:
+            continue
+        print(
+            f"Generating {len(profile_rows)} {profile} validation answers "
+            f"in batches of {runtime_config.GENERATOR_BATCH_SIZE}"
+        )
+        for start in range(0, len(profile_rows), runtime_config.GENERATOR_BATCH_SIZE):
+            batch = profile_rows[start:start + runtime_config.GENERATOR_BATCH_SIZE]
+            outputs = generator.batch_generate(
+                [row["query"] for row in batch],
+                [row["generation_paragraphs"] for row in batch],
+                profile=profile,
+                max_seq_len=max_seq_len,
+            )
+            for row, answer in zip(batch, outputs):
+                ordered_rows[row["ID"]]["abstractive"] = answer
+    return [ordered_rows[row["ID"]] for row in prepared_rows]
+
+
 def main() -> None:
     args = normalize_args(build_parser().parse_args())
     validate_args(args)
@@ -250,7 +278,7 @@ def main() -> None:
     generator.model = model
     generator.tokenizer = tokenizer
 
-    prediction_rows = []
+    prepared_rows = []
     gold_rows = []
     dense_retrievals = []
     reranked_retrievals = []
@@ -323,16 +351,12 @@ def main() -> None:
             predicted_refs,
             predicted_profile,
         )
-        predicted_answer = generator.generate(
-            sample["query"],
-            generation_paragraphs,
-            profile=predicted_profile,
-            max_seq_len=args.max_seq_len,
-        )
-        prediction_rows.append(
+        prepared_rows.append(
             {
                 "ID": sample["ID"],
-                "abstractive": predicted_answer,
+                "query": sample["query"],
+                "generation_paragraphs": generation_paragraphs,
+                "abstractive": None,
                 "refs": ",".join(predicted_refs),
                 "profile": predicted_profile,
             }
@@ -378,6 +402,11 @@ def main() -> None:
             }
         )
 
+    prediction_rows = generate_prepared_rows_in_batches(
+        generator,
+        prepared_rows,
+        max_seq_len=args.max_seq_len,
+    )
     pred_df = pd.DataFrame(prediction_rows)
     gold_df = pd.DataFrame(gold_rows)
     pred_df.to_csv(args.output_dir / "val_predictions.csv", index=False, encoding="utf-8")

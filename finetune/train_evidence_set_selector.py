@@ -146,7 +146,7 @@ def main() -> None:
         resolve_model_source(args.embed_model_name_or_path, project_root=args.project_root),
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
-    reranker = load_reranker_if_available(str(args.rerank_model_name_or_path))
+    reranker = load_reranker_if_available(str(args.rerank_model_name_or_path), force=True)
     if reranker is not None:
         reranker.load_model()
 
