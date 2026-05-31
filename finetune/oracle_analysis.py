@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -27,6 +28,12 @@ from .common import (
     run_evaluation,
     save_json,
 )
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,30 +108,52 @@ def main() -> None:
 
     from sentence_transformers import SentenceTransformer
 
+    print("Oracle analysis configuration")
+    print(f"  project_root={args.project_root}")
+    print(f"  train_json_path={args.train_json_path}")
+    print(f"  embed_model_name_or_path={resolve_model_source(args.embed_model_name_or_path, project_root=args.project_root)}")
+    print(f"  rerank_model_name_or_path={args.rerank_model_name_or_path}")
+    print(f"  output_dir={args.output_dir}")
+    print(f"  retrieval_top_k={args.retrieval_top_k}")
+
+    print("Loading training data")
     docs, queries, doc_lookup = load_training_data(args.train_json_path)
     if args.split_metadata_path and args.split_metadata_path.exists():
+        print(f"Loading split metadata from {args.split_metadata_path}")
         split_metadata = load_json(args.split_metadata_path)
         val_queries = filter_queries_by_ids(queries, split_metadata.get("val_query_ids", []))
     else:
+        print(f"Building grouped validation split with seed={args.seed} val_doc_ratio={args.val_doc_ratio}")
         _, val_queries, _, _ = grouped_doc_split(queries, args.val_doc_ratio, args.seed)
     val_docs = [doc_lookup[doc_id] for doc_id in sorted({query["doc_id"] for query in val_queries})]
     val_samples, missing_refs = build_raw_samples(val_queries, doc_lookup)
+    print(f"Loaded docs={len(docs)} queries={len(queries)} val_samples={len(val_samples)} missing_ref_rows={len(missing_refs)}")
 
+    print("Loading embedding model")
     embedder = SentenceTransformer(
         resolve_model_source(args.embed_model_name_or_path, project_root=args.project_root),
         cache_folder=cache_dir_as_str(args.cache_dir),
     )
+    print("Loading reranker")
     reranker = load_reranker_if_available(str(args.rerank_model_name_or_path), force=True)
     if reranker is not None:
         reranker.load_model()
+        print("Reranker loaded")
+    else:
+        print("Reranker unavailable; using hybrid rerank only")
+    print("Building validation document embedding index")
     doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
+    print("Running oracle loop")
     dense_hit20 = 0
     rerank_hit20 = 0
     best_sentence_rows = []
     extractability = []
     profiles = []
-    for sample in val_samples:
+    total_samples = len(val_samples)
+    for index, sample in enumerate(val_samples, start=1):
+        if index == 1 or index % 25 == 0 or index == total_samples:
+            print(f"  oracle progress {index}/{total_samples}")
         dense = retrieve_paragraphs(doc_embedding_index, sample["doc_id"], sample["query"], embedder, args.retrieval_top_k)
         profile = detect_answer_profile(sample["query"], dense)
         reranked = rerank_retrieved(sample["query"], dense, profile=profile, reranker=reranker)
@@ -146,6 +175,7 @@ def main() -> None:
         )
         profiles.append(profile)
 
+    print("Scoring oracle sentence predictions")
     gold_df = pd.DataFrame(
         [
             {"ID": sample["ID"], "abstractive": sample["answer"], "refs": sample["gold_refs"]}
@@ -172,6 +202,8 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     pred_df.to_csv(args.output_dir / "oracle_sentence_predictions.csv", index=False, encoding="utf-8")
     save_json(args.output_dir / "oracle_metrics.json", metrics)
+    print(f"Saved oracle predictions to {args.output_dir / 'oracle_sentence_predictions.csv'}")
+    print(f"Saved oracle metrics to {args.output_dir / 'oracle_metrics.json'}")
     print(metrics)
 
 
