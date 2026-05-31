@@ -7,6 +7,7 @@ from collections import Counter
 
 from src import config as runtime_config
 from src.answer_candidates import select_heuristic_candidate
+from src.answer_ranker import load_answer_ranker_if_available
 from src.generator import Generator
 from src.prompting import detect_answer_profile
 from src.ref_selector import load_ref_selector_if_available
@@ -132,6 +133,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  semi_extractive_composer={runtime_config.ENABLE_SEMI_EXTRACTIVE_COMPOSER}")
     print(f"  answer_candidates={runtime_config.ENABLE_ANSWER_CANDIDATES}")
     print(f"  answer_candidate_selection_mode={runtime_config.ANSWER_CANDIDATE_SELECTION_MODE}")
+    print(f"  answer_ranker_model_path={runtime_config.ANSWER_RANKER_MODEL_PATH}")
     print(f"  output_dir={args.output_dir}")
     print(f"  cache_dir={args.cache_dir}")
 
@@ -177,6 +179,7 @@ def generate_prepared_rows_in_batches(
     prepared_rows: list[dict],
     *,
     max_seq_len: int,
+    answer_ranker=None,
 ) -> list[dict]:
     oracle_scorer = None
     if runtime_config.ENABLE_ANSWER_CANDIDATES and runtime_config.ANSWER_CANDIDATE_SELECTION_MODE == "oracle":
@@ -225,6 +228,15 @@ def generate_prepared_rows_in_batches(
                             row["generation_paragraphs"],
                             profile,
                         )
+                    elif mode == "ranker" and answer_ranker is not None:
+                        prediction = answer_ranker.select(
+                            row["query"],
+                            candidates,
+                            row["generation_paragraphs"],
+                            profile,
+                        )
+                        chosen = {"variant": prediction.variant, "answer": prediction.answer}
+                        ordered_rows[row["ID"]]["answer_ranker_score"] = prediction.score
                     else:
                         chosen = next((item for item in candidates if item["variant"] == "base"), candidates[0])
                     ordered_rows[row["ID"]]["abstractive"] = chosen["answer"]
@@ -318,6 +330,9 @@ def main() -> None:
     evidence_selector = load_evidence_set_selector_if_available()
     if evidence_selector is not None and runtime_config.ENABLE_EVIDENCE_SET_SELECTOR:
         evidence_selector.load_model()
+    answer_ranker = load_answer_ranker_if_available()
+    if answer_ranker is not None and runtime_config.ANSWER_CANDIDATE_SELECTION_MODE == "ranker":
+        answer_ranker.load_model()
 
     doc_embedding_index = build_document_embedding_index(val_docs, embedder)
 
@@ -454,6 +469,7 @@ def main() -> None:
         generator,
         prepared_rows,
         max_seq_len=args.max_seq_len,
+        answer_ranker=answer_ranker,
     )
     pred_df = pd.DataFrame(prediction_rows)
     gold_df = pd.DataFrame(gold_rows)
@@ -471,6 +487,10 @@ def main() -> None:
                         "ID": row["ID"],
                         "profile": row["profile"],
                         "chosen_variant": row.get("answer_variant", "base"),
+                        "query": row["query"],
+                        "gold_answer": row.get("gold_answer", ""),
+                        "selected_refs": row.get("refs", ""),
+                        "evidence": row.get("generation_paragraphs", []),
                         "candidates": row.get("answer_candidates", []),
                     }
                     for row in prediction_rows

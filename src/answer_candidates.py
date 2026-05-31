@@ -26,6 +26,26 @@ VARIANT_INSTRUCTIONS = {
         "Answer in Thai with strict source fidelity. "
         "Use only statements grounded in the references and keep the answer compact."
     ),
+    "fact_entity_first": (
+        "For factual questions, answer with the requested name, date, number, place, or decision first. "
+        "Do not begin with background or source phrases. Use one concise sentence."
+    ),
+    "fact_gold_phrase": (
+        "For factual questions, keep the exact key phrase from the evidence whenever possible. "
+        "Preserve token order around names, agencies, dates, numbers, and decisions."
+    ),
+    "list_gold_format": (
+        "For list questions, produce only the requested items. "
+        "Use one item per line with numbered formatting and avoid explanatory clauses."
+    ),
+    "synthesis_short_gold": (
+        "For synthesis questions, answer in one or two compact Thai sentences. "
+        "Keep the main evidence phrases and avoid adding background context."
+    ),
+    "no_preamble": (
+        "Do not start with source-preface phrases such as 'จากเอกสาร', 'จากข้อมูล', or 'ที่ประชุม'. "
+        "Start directly with the answer content."
+    ),
 }
 
 

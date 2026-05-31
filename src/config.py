@@ -221,9 +221,13 @@ ENABLE_ANSWER_CANDIDATES = os.environ.get("CAMNET_ENABLE_ANSWER_CANDIDATES", "0"
 ANSWER_CANDIDATE_SELECTION_MODE = os.environ.get("CAMNET_ANSWER_CANDIDATE_SELECTION_MODE", "base").strip().lower()
 ANSWER_CANDIDATE_VARIANTS = [
     item.strip()
-    for item in os.environ.get("CAMNET_ANSWER_CANDIDATE_VARIANTS", "base,concise,gold_style,list_style").split(",")
+    for item in os.environ.get(
+        "CAMNET_ANSWER_CANDIDATE_VARIANTS",
+        "base,concise,gold_style,list_style,source_faithful,fact_entity_first,fact_gold_phrase,list_gold_format,synthesis_short_gold,no_preamble",
+    ).split(",")
     if item.strip()
 ]
+ANSWER_RANKER_MODEL_PATH = os.environ.get("CAMNET_ANSWER_RANKER_MODEL_PATH")
 ENABLE_SOURCE_ANCHORED_FACT_TARGETS = os.environ.get("CAMNET_ENABLE_SOURCE_ANCHORED_FACT_TARGETS", "0").strip() not in {
     "0",
     "false",
