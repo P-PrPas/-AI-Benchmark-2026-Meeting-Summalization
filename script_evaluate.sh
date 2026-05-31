@@ -17,6 +17,7 @@ CACHE_ROOT="/project/zz991000-zdeva/zz991011/.cache"
 OUTPUT_DIR="${CAMNET_FINETUNE_OUTPUT_DIR:-$REPO_ROOT/artifacts/typhoon25_qwen3_4b_rag_qa_qlora}"
 EVAL_MODEL_PATH="${CAMNET_EVAL_MODEL_PATH:-$OUTPUT_DIR/final_merged}"
 EMBED_MODEL_PATH="${CAMNET_EMBED_MODEL_PATH:-$MODEL_ROOT/bge-m3}"
+RERANK_MODEL_PATH="${CAMNET_RERANK_MODEL_PATH:-$REPO_ROOT/artifacts/reranker_phase_b_v1/final_model}"
 CONDA_ENV_NAME="three_env"
 
 mkdir -p "$REPO_ROOT/logs" "$OUTPUT_DIR"
@@ -38,6 +39,8 @@ export CAMNET_ENABLE_LLM_REF_ARBITER="${CAMNET_ENABLE_LLM_REF_ARBITER:-0}"
 export CAMNET_ENABLE_QUERY_REFINEMENT="${CAMNET_ENABLE_QUERY_REFINEMENT:-0}"
 export CAMNET_ENABLE_EVIDENCE_COMPRESSION="${CAMNET_ENABLE_EVIDENCE_COMPRESSION:-0}"
 export CAMNET_ENABLE_FACT_ANSWER_REWRITE="${CAMNET_ENABLE_FACT_ANSWER_REWRITE:-0}"
+export CAMNET_USE_RERANKER="${CAMNET_USE_RERANKER:-1}"
+export CAMNET_RERANK_MODEL_PATH="$RERANK_MODEL_PATH"
 export CAMNET_FACT_MAX_NEW_TOKENS="${CAMNET_FACT_MAX_NEW_TOKENS:-96}"
 export CAMNET_FACT_MAX_ANSWER_CHARS="${CAMNET_FACT_MAX_ANSWER_CHARS:-220}"
 export CAMNET_STRICT_RETRY_MAX_NEW_TOKENS="${CAMNET_STRICT_RETRY_MAX_NEW_TOKENS:-72}"
@@ -52,6 +55,8 @@ echo "Running on node: $(hostname)"
 echo "Evaluate Model"
 echo "Eval model path: $EVAL_MODEL_PATH"
 echo "Embed model path: $EMBED_MODEL_PATH"
+echo "Rerank model path: $RERANK_MODEL_PATH"
+echo "Use reranker: $CAMNET_USE_RERANKER"
 echo "Retrieval top-k: $CAMNET_RETRIEVAL_TOP_K"
 
 conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate \
@@ -59,6 +64,7 @@ conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate \
   --train-json-path "$REPO_ROOT/data/train/train_set.json" \
   --model-name-or-path "$EVAL_MODEL_PATH" \
   --embed-model-name-or-path "$EMBED_MODEL_PATH" \
+  --rerank-model-name-or-path "$RERANK_MODEL_PATH" \
   --output-dir "$OUTPUT_DIR" \
   --cache-dir "$CACHE_ROOT" \
   --retrieval-top-k "$CAMNET_RETRIEVAL_TOP_K" \
