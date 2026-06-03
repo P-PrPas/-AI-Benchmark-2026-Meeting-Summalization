@@ -16,6 +16,8 @@ EMBED_MODEL_NAME="${CAMNET_SUBMIT_EMBED_MODEL_NAME:-bge-m3}"
 RERANK_MODEL_NAME="${CAMNET_SUBMIT_RERANK_MODEL_NAME:-reranker_phase_b_v1_final_model}"
 EVIDENCE_SET_MODEL_NAME="${CAMNET_SUBMIT_EVIDENCE_SET_MODEL_NAME:-evidence_set_rerank_on_v1}"
 LLM_MODEL_NAME="${CAMNET_SUBMIT_LLM_MODEL_NAME:-llm_best_run_c5_final_merged}"
+PIPELINE_MODE="${CAMNET_SUBMIT_PIPELINE_MODE:-rag}"
+LLM_ONLY_PROMPT_MODE="${CAMNET_SUBMIT_LLM_ONLY_PROMPT_MODE:-minimal}"
 
 if [ -z "$1" ]; then
   echo "Usage: ./submit.sh <USER_TAG>"
@@ -56,6 +58,8 @@ echo "  Embed model : ${EMBED_MODEL_NAME}"
 echo "  Rerank model: ${RERANK_MODEL_NAME}"
 echo "  Evidence set: ${EVIDENCE_SET_MODEL_NAME}"
 echo "  LLM model   : ${LLM_MODEL_NAME}"
+echo "  Pipeline    : ${PIPELINE_MODE}"
+echo "  LLM prompt  : ${LLM_ONLY_PROMPT_MODE}"
 echo "========================================"
 
 require_dir "weight/${EMBED_MODEL_NAME}"
@@ -121,6 +125,8 @@ docker build \
   --build-arg EVIDENCE_SET_MODEL_NAME=${EVIDENCE_SET_MODEL_NAME} \
   --build-arg LLM_IMAGE=${LLM_LOCAL_IMAGE} \
   --build-arg CAMNET_LLM_MODEL_NAME=${LLM_MODEL_NAME} \
+  --build-arg CAMNET_PIPELINE_MODE=${PIPELINE_MODE} \
+  --build-arg CAMNET_LLM_ONLY_PROMPT_MODE=${LLM_ONLY_PROMPT_MODE} \
   -t ${FINAL_LOCAL_NAME} .
 
 echo ""

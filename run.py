@@ -22,6 +22,13 @@ from src import config
 from src.generator import Generator
 from src.candidate_expansion import expanded_retrieve_from_dense
 from src.evidence_set import load_evidence_set_selector_if_available
+from src.llm_only import (
+    build_llm_only_prompt,
+    fallback_refs_by_answer_overlap,
+    paragraph_ids,
+    parse_llm_only_output,
+    truncate_paragraphs_by_chars,
+)
 from src.prompting import detect_answer_profile
 from src.ref_selector import load_ref_selector_if_available
 from src.reranker import load_reranker_if_available
@@ -51,6 +58,7 @@ STARTUP_SLEEP_SECONDS = config.STARTUP_SLEEP_SECONDS
 
 def log_runtime_context():
     print("[info] Runtime configuration")
+    print(f"      PIPELINE_MODE={config.PIPELINE_MODE}")
     print(f"      TEST_PATH={TEST_PATH}")
     print(f"      RESULT_PATH={RESULT_PATH}")
     print(f"      EMBED_MODEL_PATH={config.EMBED_MODEL_PATH}")
@@ -78,6 +86,11 @@ def log_runtime_context():
     print(f"      RERANK_MAX_LENGTH={config.RERANK_MAX_LENGTH}")
     print(f"      ENABLE_FACT_FEW_SHOT={config.ENABLE_FACT_FEW_SHOT}")
     print(f"      GENERATOR_BATCH_SIZE={config.GENERATOR_BATCH_SIZE}")
+    print(f"      LLM_ONLY_PROMPT_MODE={config.LLM_ONLY_PROMPT_MODE}")
+    print(f"      LLM_ONLY_MAX_SEQ_LEN={config.LLM_ONLY_MAX_SEQ_LEN}")
+    print(f"      LLM_ONLY_MAX_NEW_TOKENS={config.LLM_ONLY_MAX_NEW_TOKENS}")
+    print(f"      LLM_ONLY_BATCH_SIZE={config.LLM_ONLY_BATCH_SIZE}")
+    print(f"      LLM_ONLY_MAX_DOC_CHARS={config.LLM_ONLY_MAX_DOC_CHARS}")
     print(f"      PROGRESS_UPDATE_EVERY={config.PROGRESS_UPDATE_EVERY}")
 
 
@@ -265,6 +278,159 @@ def load_generator() -> Generator:
     return generator
 
 
+def load_llm_only_model():
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model_path = Path(config.LLM_ONLY_MODEL_PATH).expanduser() if config.LLM_ONLY_MODEL_PATH else config.LLM_MODEL_PATH
+    print(f"[2/4] Loading LLM-only model from {model_path} ...")
+    if not model_path.exists():
+        available = []
+        if model_path.parent.exists():
+            available = sorted(path.name for path in model_path.parent.iterdir() if path.is_dir())
+        raise FileNotFoundError(
+            f"LLM-only model path not found: {model_path}. Available model directories: {available}"
+        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_path),
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    dtype = torch.float32
+    if torch.cuda.is_available():
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    model = AutoModelForCausalLM.from_pretrained(
+        str(model_path),
+        torch_dtype=dtype,
+        device_map="auto" if torch.cuda.is_available() else None,
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+    model.eval()
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.use_cache = True
+    print("      LLM-only model loaded successfully")
+    return tokenizer, model
+
+
+def render_llm_only_prompts(tokenizer, prompts: List[str]) -> List[str]:
+    if not config.LLM_ONLY_USE_CHAT_TEMPLATE:
+        return prompts
+    return [
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for prompt in prompts
+    ]
+
+
+def batch_generate_llm_only(tokenizer, model, prompts: List[str]) -> List[str]:
+    import torch
+
+    outputs: List[str] = []
+    batch_size = max(1, config.LLM_ONLY_BATCH_SIZE)
+    for start in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[start:start + batch_size]
+        rendered = render_llm_only_prompts(tokenizer, batch_prompts)
+        encoded = tokenizer(
+            rendered,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=config.LLM_ONLY_MAX_SEQ_LEN,
+        ).to(model.device)
+        with torch.inference_mode():
+            generated = model.generate(
+                **encoded,
+                max_new_tokens=config.LLM_ONLY_MAX_NEW_TOKENS,
+                do_sample=False,
+                repetition_penalty=config.LLM_ONLY_REPETITION_PENALTY,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        prompt_width = encoded.input_ids.shape[1]
+        outputs.extend(
+            tokenizer.decode(row[prompt_width:], skip_special_tokens=True)
+            for row in generated
+        )
+        completed = min(start + len(batch_prompts), len(prompts))
+        if completed % max(1, config.PROGRESS_UPDATE_EVERY) == 0 or completed == len(prompts):
+            call_progress(completed)
+            print(f"      Generated {completed}/{len(prompts)}")
+    return outputs
+
+
+def run_llm_only(data: dict) -> None:
+    doc_index = build_doc_index(data)
+    queries = data["queries"]
+    total = len(queries)
+    print(f"      {len(data['docs'])} docs | {total} queries")
+    tokenizer, model = load_llm_only_model()
+
+    prepared_rows: List[Dict] = []
+    prompts: List[str] = []
+    print(f"[3/4] Building full-document prompts for {total} queries ...")
+    for query_row in tqdm(queries, desc="Preparing"):
+        paragraphs = truncate_paragraphs_by_chars(
+            doc_index.get(query_row["doc_id"], []),
+            max_doc_chars=config.LLM_ONLY_MAX_DOC_CHARS,
+        )
+        prompts.append(
+            build_llm_only_prompt(
+                query_row["query"],
+                paragraphs,
+                mode=config.LLM_ONLY_PROMPT_MODE,
+                max_doc_chars=config.LLM_ONLY_MAX_DOC_CHARS,
+            )
+        )
+        prepared_rows.append(
+            {
+                "ID": query_row["ID"],
+                "paragraphs": paragraphs,
+                "valid_refs": paragraph_ids(paragraphs),
+            }
+        )
+
+    print(f"[4/4] Generating LLM-only answers on {total} queries ...")
+    raw_outputs = batch_generate_llm_only(tokenizer, model, prompts)
+    rows = []
+    parse_errors = 0
+    invalid_ref_rows = 0
+    empty_ref_rows = 0
+    for row, raw_output in zip(prepared_rows, raw_outputs):
+        parsed = parse_llm_only_output(raw_output, row["valid_refs"])
+        refs = parsed.refs
+        if not refs and config.LLM_ONLY_REF_FALLBACK:
+            refs = fallback_refs_by_answer_overlap(parsed.abstractive, row["paragraphs"], max_refs=1)
+        parse_errors += int(parsed.parse_error)
+        invalid_ref_rows += int(bool(parsed.invalid_refs))
+        empty_ref_rows += int(not refs)
+        rows.append(
+            {
+                "ID": row["ID"],
+                "abstractive": parsed.abstractive,
+                "refs": ",".join(refs),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    df.to_csv(RESULT_PATH, index=False, encoding="utf-8")
+    print(
+        "      LLM-only diagnostics: "
+        f"parse_error_rate={parse_errors / max(1, total):.4f} "
+        f"invalid_ref_rate={invalid_ref_rows / max(1, total):.4f} "
+        f"empty_ref_rate={empty_ref_rows / max(1, total):.4f}"
+    )
+    print(f"\nSaved {len(df)} rows -> {RESULT_PATH}")
+    call_progress(total)
+    print("Done.")
+
+
 def load_reranker():
     print(f"[3/4] Loading reranker from {config.RERANK_MODEL_PATH} ...")
     reranker = load_reranker_if_available()
@@ -320,6 +486,11 @@ def main():
         time.sleep(STARTUP_SLEEP_SECONDS)
 
     data = load_data(TEST_PATH)
+    if config.PIPELINE_MODE == "llm_only":
+        run_llm_only(data)
+        return
+    if config.PIPELINE_MODE != "rag":
+        raise ValueError("CAMNET_PIPELINE_MODE must be either 'rag' or 'llm_only'")
     doc_index = build_doc_index(data)
     queries = data["queries"]
     total = len(queries)

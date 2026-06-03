@@ -145,10 +145,28 @@ PROGRESS_LIB = _resolve_path(
 )
 
 STARTUP_SLEEP_SECONDS = int(os.environ.get("CAMNET_STARTUP_SLEEP_SECONDS", "10"))
+PIPELINE_MODE = os.environ.get("CAMNET_PIPELINE_MODE", "rag").strip().lower()
 EMBED_BATCH_SIZE = int(os.environ.get("CAMNET_EMBED_BATCH_SIZE", "128"))
 RERANK_BATCH_SIZE = int(os.environ.get("CAMNET_RERANK_BATCH_SIZE", "16"))
 RERANK_MAX_LENGTH = int(os.environ.get("CAMNET_RERANK_MAX_LENGTH", "2048"))
 GENERATOR_BATCH_SIZE = int(os.environ.get("CAMNET_GENERATOR_BATCH_SIZE", "4"))
+LLM_ONLY_PROMPT_MODE = os.environ.get("CAMNET_LLM_ONLY_PROMPT_MODE", "minimal").strip().lower()
+LLM_ONLY_MODEL_PATH = os.environ.get("CAMNET_LLM_ONLY_MODEL_PATH")
+LLM_ONLY_MAX_DOC_CHARS = int(os.environ.get("CAMNET_LLM_ONLY_MAX_DOC_CHARS", "0"))
+LLM_ONLY_MAX_SEQ_LEN = int(os.environ.get("CAMNET_LLM_ONLY_MAX_SEQ_LEN", "32768"))
+LLM_ONLY_MAX_NEW_TOKENS = int(os.environ.get("CAMNET_LLM_ONLY_MAX_NEW_TOKENS", "384"))
+LLM_ONLY_BATCH_SIZE = int(os.environ.get("CAMNET_LLM_ONLY_BATCH_SIZE", "1"))
+LLM_ONLY_REPETITION_PENALTY = float(os.environ.get("CAMNET_LLM_ONLY_REPETITION_PENALTY", "1.03"))
+LLM_ONLY_USE_CHAT_TEMPLATE = os.environ.get("CAMNET_LLM_ONLY_USE_CHAT_TEMPLATE", "1").strip() not in {
+    "0",
+    "false",
+    "False",
+}
+LLM_ONLY_REF_FALLBACK = os.environ.get("CAMNET_LLM_ONLY_REF_FALLBACK", "0").strip() not in {
+    "0",
+    "false",
+    "False",
+}
 ENABLE_FACT_FEW_SHOT = os.environ.get("CAMNET_ENABLE_FACT_FEW_SHOT", "1").strip() not in {
     "0",
     "false",
