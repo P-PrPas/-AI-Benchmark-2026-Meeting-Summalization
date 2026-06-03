@@ -91,6 +91,8 @@ def log_runtime_context():
     print(f"      LLM_ONLY_MAX_NEW_TOKENS={config.LLM_ONLY_MAX_NEW_TOKENS}")
     print(f"      LLM_ONLY_BATCH_SIZE={config.LLM_ONLY_BATCH_SIZE}")
     print(f"      LLM_ONLY_MAX_DOC_CHARS={config.LLM_ONLY_MAX_DOC_CHARS}")
+    print(f"      LLM_ONLY_TEMPERATURE={config.LLM_ONLY_TEMPERATURE}")
+    print(f"      LLM_ONLY_TOP_P={config.LLM_ONLY_TOP_P}")
     print(f"      PROGRESS_UPDATE_EVERY={config.PROGRESS_UPDATE_EVERY}")
 
 
@@ -345,14 +347,18 @@ def batch_generate_llm_only(tokenizer, model, prompts: List[str]) -> List[str]:
             max_length=config.LLM_ONLY_MAX_SEQ_LEN,
         ).to(model.device)
         with torch.inference_mode():
-            generated = model.generate(
+            generate_kwargs = {
                 **encoded,
-                max_new_tokens=config.LLM_ONLY_MAX_NEW_TOKENS,
-                do_sample=False,
-                repetition_penalty=config.LLM_ONLY_REPETITION_PENALTY,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+                "max_new_tokens": config.LLM_ONLY_MAX_NEW_TOKENS,
+                "do_sample": config.LLM_ONLY_TEMPERATURE > 0.0,
+                "repetition_penalty": config.LLM_ONLY_REPETITION_PENALTY,
+                "pad_token_id": tokenizer.pad_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+            }
+            if config.LLM_ONLY_TEMPERATURE > 0.0:
+                generate_kwargs["temperature"] = config.LLM_ONLY_TEMPERATURE
+                generate_kwargs["top_p"] = config.LLM_ONLY_TOP_P
+            generated = model.generate(**generate_kwargs)
         prompt_width = encoded.input_ids.shape[1]
         outputs.extend(
             tokenizer.decode(row[prompt_width:], skip_special_tokens=True)

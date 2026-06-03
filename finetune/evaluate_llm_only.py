@@ -11,10 +11,12 @@ from typing import Any, Sequence
 from src import config as runtime_config
 from src.llm_only import (
     build_llm_only_prompt,
+    consensus_candidate_score,
     fallback_refs_by_answer_overlap,
     normalize_prompt_mode,
     paragraph_ids,
     parse_llm_only_output,
+    resolve_decode_specs,
     truncate_paragraphs_by_chars,
 )
 
@@ -26,6 +28,7 @@ from .common import (
     build_raw_samples,
     build_split_metadata,
     cache_dir_as_str,
+    calculate_iou,
     configure_cache_env,
     ensure_local_model_exists,
     ensure_path_exists,
@@ -37,6 +40,7 @@ from .common import (
     resolve_path,
     run_evaluation,
     save_json,
+    tokenize_thai,
 )
 
 
@@ -64,6 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-doc-chars", type=int, default=runtime_config.LLM_ONLY_MAX_DOC_CHARS)
     parser.add_argument("--batch-size", type=int, default=runtime_config.LLM_ONLY_BATCH_SIZE)
     parser.add_argument("--repetition-penalty", type=float, default=runtime_config.LLM_ONLY_REPETITION_PENALTY)
+    parser.add_argument("--temperature", type=float, default=runtime_config.LLM_ONLY_TEMPERATURE)
+    parser.add_argument("--top-p", type=float, default=runtime_config.LLM_ONLY_TOP_P)
+    parser.add_argument(
+        "--candidate-variants",
+        default=",".join(runtime_config.LLM_ONLY_CANDIDATE_VARIANTS),
+        help="Comma-separated decode variants: base,temp0.2,max512,rp1.0 or name:t=0.2:tokens=512:rp=1.0",
+    )
+    parser.add_argument(
+        "--candidate-selection-mode",
+        choices=["base", "consensus", "oracle"],
+        default=runtime_config.LLM_ONLY_CANDIDATE_SELECTION_MODE,
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-doc-ratio", type=float, default=0.2)
     parser.add_argument("--load-in-4bit", action="store_true")
@@ -116,6 +132,11 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  max_new_tokens={args.max_new_tokens}")
     print(f"  max_doc_chars={args.max_doc_chars}")
     print(f"  batch_size={args.batch_size}")
+    print(f"  repetition_penalty={args.repetition_penalty}")
+    print(f"  temperature={args.temperature}")
+    print(f"  top_p={args.top_p}")
+    print(f"  candidate_variants={args.candidate_variants}")
+    print(f"  candidate_selection_mode={args.candidate_selection_mode}")
     print(f"  load_in_4bit={args.load_in_4bit}")
     print(f"  use_chat_template={args.use_chat_template}")
     print(f"  enable_ref_fallback={args.enable_ref_fallback}")
@@ -179,6 +200,8 @@ def batch_generate_raw(
     max_seq_len: int,
     max_new_tokens: int,
     repetition_penalty: float,
+    temperature: float,
+    top_p: float,
     use_chat_template: bool,
 ) -> list[str]:
     import torch
@@ -195,14 +218,18 @@ def batch_generate_raw(
             max_length=max_seq_len,
         ).to(model.device)
         with torch.inference_mode():
-            generated = model.generate(
+            generate_kwargs = {
                 **encoded,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                repetition_penalty=repetition_penalty,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+                "max_new_tokens": max_new_tokens,
+                "do_sample": temperature > 0.0,
+                "repetition_penalty": repetition_penalty,
+                "pad_token_id": tokenizer.pad_token_id,
+                "eos_token_id": tokenizer.eos_token_id,
+            }
+            if temperature > 0.0:
+                generate_kwargs["temperature"] = temperature
+                generate_kwargs["top_p"] = top_p
+            generated = model.generate(**generate_kwargs)
         prompt_width = encoded.input_ids.shape[1]
         outputs.extend(
             tokenizer.decode(row[prompt_width:], skip_special_tokens=True)
@@ -210,6 +237,44 @@ def batch_generate_raw(
         )
         print(f"Generated {min(start + len(batch_prompts), len(prompts))}/{len(prompts)}")
     return outputs
+
+
+class ThaiSpaceTokenizer:
+    def tokenize(self, text: str) -> list[str]:
+        return text.split(" ")
+
+
+def candidate_rouge(scorer: Any, gold_answer: str, pred_answer: str) -> float:
+    return scorer.score(tokenize_thai(gold_answer), tokenize_thai(pred_answer))["rougeL"].fmeasure
+
+
+def select_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    mode: str,
+    gold_answer: str | None = None,
+    gold_refs: Sequence[str] | None = None,
+    semantic_scores: dict[str, float] | None = None,
+    rouge_scorer_obj: Any | None = None,
+) -> dict[str, Any]:
+    if not candidates:
+        return {}
+    if mode == "base":
+        return next((candidate for candidate in candidates if candidate["variant"] == "base"), candidates[0])
+    if mode == "consensus":
+        return max(candidates, key=lambda candidate: consensus_candidate_score(candidate, candidates))
+    if mode == "oracle":
+        if gold_answer is None or gold_refs is None or semantic_scores is None or rouge_scorer_obj is None:
+            raise ValueError("Oracle candidate selection requires gold answer, refs, semantic scores, and rouge scorer.")
+        return max(
+            candidates,
+            key=lambda candidate: (
+                0.35 * candidate_rouge(rouge_scorer_obj, gold_answer, candidate["abstractive"])
+                + 0.45 * semantic_scores.get(candidate["variant"], 0.0)
+                + 0.20 * calculate_iou(",".join(candidate["refs"]), gold_refs)
+            ),
+        )
+    raise ValueError(f"Unsupported candidate selection mode: {mode}")
 
 
 def main() -> None:
@@ -283,39 +348,118 @@ def main() -> None:
         )
 
     print(f"Validation samples={len(prepared)}")
-    raw_outputs = batch_generate_raw(
-        model,
-        tokenizer,
-        prompts,
-        batch_size=args.batch_size,
-        max_seq_len=args.max_seq_len,
-        max_new_tokens=args.max_new_tokens,
-        repetition_penalty=args.repetition_penalty,
-        use_chat_template=args.use_chat_template,
-    )
+    candidate_variants = [item.strip() for item in args.candidate_variants.split(",") if item.strip()]
+    decode_specs = resolve_decode_specs(candidate_variants)
+    print("Decode specs:")
+    for spec in decode_specs:
+        print(
+            f"  {spec.name}: max_new_tokens={spec.max_new_tokens} "
+            f"temperature={spec.temperature} top_p={spec.top_p} rp={spec.repetition_penalty}"
+        )
+    raw_outputs_by_variant: dict[str, list[str]] = {}
+    for spec in decode_specs:
+        print(f"Generating variant={spec.name}")
+        raw_outputs_by_variant[spec.name] = batch_generate_raw(
+            model,
+            tokenizer,
+            prompts,
+            batch_size=args.batch_size,
+            max_seq_len=args.max_seq_len,
+            max_new_tokens=spec.max_new_tokens,
+            repetition_penalty=spec.repetition_penalty,
+            temperature=spec.temperature,
+            top_p=spec.top_p,
+            use_chat_template=args.use_chat_template,
+        )
 
     del model
     gc.collect()
     torch.cuda.empty_cache()
 
+    semantic_source = resolve_model_source(args.semantic_model_name_or_path, project_root=args.project_root)
+    semantic_model = SentenceTransformer(
+        semantic_source,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        cache_folder=cache_dir_as_str(args.cache_dir),
+    )
+    rouge_scorer_obj = None
+    if args.candidate_selection_mode == "oracle":
+        from rouge_score import rouge_scorer
+
+        rouge_scorer_obj = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=ThaiSpaceTokenizer())
+
     prediction_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
+    candidate_payload_rows: list[dict[str, Any]] = []
     parse_errors = 0
     invalid_ref_rows = 0
     empty_ref_rows = 0
-    for sample, raw_response in zip(prepared, raw_outputs):
-        parsed = parse_llm_only_output(raw_response, sample["valid_refs"])
-        refs = parsed.refs
-        if not refs and args.enable_ref_fallback:
-            refs = fallback_refs_by_answer_overlap(parsed.abstractive, sample["paragraphs"], max_refs=1)
-        parse_errors += int(parsed.parse_error)
-        invalid_ref_rows += int(bool(parsed.invalid_refs))
+    chosen_variant_counts: Counter[str] = Counter()
+    for row_index, sample in enumerate(prepared):
+        candidates: list[dict[str, Any]] = []
+        for spec in decode_specs:
+            raw_response = raw_outputs_by_variant[spec.name][row_index]
+            parsed = parse_llm_only_output(raw_response, sample["valid_refs"])
+            refs = parsed.refs
+            if not refs and args.enable_ref_fallback:
+                refs = fallback_refs_by_answer_overlap(parsed.abstractive, sample["paragraphs"], max_refs=1)
+            candidates.append(
+                {
+                    "variant": spec.name,
+                    "abstractive": parsed.abstractive,
+                    "refs": refs,
+                    "raw_response": raw_response,
+                    "parse_error": parsed.parse_error,
+                    "invalid_refs": parsed.invalid_refs,
+                    "consensus_score": 0.0,
+                }
+            )
+        for candidate in candidates:
+            candidate["consensus_score"] = consensus_candidate_score(candidate, candidates)
+
+        semantic_scores: dict[str, float] = {}
+        if args.candidate_selection_mode == "oracle":
+            texts = [sample["answer"]] + [candidate["abstractive"] for candidate in candidates]
+            embeddings = semantic_model.encode(
+                texts,
+                batch_size=32,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            gold_embedding = embeddings[0]
+            for candidate, embedding in zip(candidates, embeddings[1:]):
+                semantic_scores[candidate["variant"]] = float((gold_embedding * embedding).sum())
+
+        chosen = select_candidate(
+            candidates,
+            mode=args.candidate_selection_mode,
+            gold_answer=sample["answer"],
+            gold_refs=sample["gold_refs"],
+            semantic_scores=semantic_scores,
+            rouge_scorer_obj=rouge_scorer_obj,
+        )
+        refs = chosen.get("refs") or []
+        parse_errors += int(chosen.get("parse_error", False))
+        invalid_ref_rows += int(bool(chosen.get("invalid_refs") or []))
         empty_ref_rows += int(not refs)
+        chosen_variant_counts[chosen.get("variant", "unknown")] += 1
         prediction_rows.append(
             {
                 "ID": sample["ID"],
-                "abstractive": parsed.abstractive,
+                "abstractive": chosen.get("abstractive", ""),
                 "refs": ",".join(refs),
+                "answer_variant": chosen.get("variant", "unknown"),
+            }
+        )
+        candidate_payload_rows.append(
+            {
+                "ID": sample["ID"],
+                "query": sample["query"],
+                "gold_answer": sample["answer"],
+                "gold_refs": sample["gold_refs"],
+                "chosen_variant": chosen.get("variant", "unknown"),
+                "candidates": candidates,
             }
         )
         diagnostic_rows.append(
@@ -325,11 +469,12 @@ def main() -> None:
                 "query": sample["query"],
                 "gold_answer": sample["answer"],
                 "gold_refs": sample["gold_refs"],
-                "pred_answer": parsed.abstractive,
+                "pred_answer": chosen.get("abstractive", ""),
                 "pred_refs": refs,
-                "raw_response": raw_response,
-                "parse_error": parsed.parse_error,
-                "invalid_refs": parsed.invalid_refs,
+                "raw_response": chosen.get("raw_response", ""),
+                "parse_error": chosen.get("parse_error", False),
+                "invalid_refs": chosen.get("invalid_refs", []),
+                "chosen_variant": chosen.get("variant", "unknown"),
                 "prompt_chars": sample["prompt_chars"],
                 "available_ref_count": len(sample["valid_refs"]),
             }
@@ -348,12 +493,6 @@ def main() -> None:
     )
     pred_df.to_csv(args.output_dir / "val_predictions.csv", index=False, encoding="utf-8")
 
-    semantic_source = resolve_model_source(args.semantic_model_name_or_path, project_root=args.project_root)
-    semantic_model = SentenceTransformer(
-        semantic_source,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        cache_folder=cache_dir_as_str(args.cache_dir),
-    )
     metrics, merged = run_evaluation(gold_df, pred_df, semantic_model)
     answer_lengths = [len(row["abstractive"]) for row in prediction_rows]
     ref_counts = [len(row["refs"].split(",")) if row["refs"] else 0 for row in prediction_rows]
@@ -368,8 +507,14 @@ def main() -> None:
     metrics["pred_answer_length_mean"] = float(pd.Series(answer_lengths).mean()) if answer_lengths else 0.0
     metrics["prompt_mode"] = args.prompt_mode
     metrics["use_chat_template"] = args.use_chat_template
+    metrics["candidate_selection_mode"] = args.candidate_selection_mode
+    metrics["candidate_variants"] = args.candidate_variants
+    total_chosen = max(1, sum(chosen_variant_counts.values()))
+    for variant, count in sorted(chosen_variant_counts.items()):
+        metrics[f"chosen_variant_pct_{variant}"] = count / total_chosen
     save_json(args.output_dir / "validation_metrics.json", metrics)
     save_json(args.output_dir / "llm_only_diagnostics.json", {"rows": diagnostic_rows})
+    save_json(args.output_dir / "llm_only_candidates.json", {"rows": candidate_payload_rows})
 
     per_row = merged[["ID", "rougeL", "SS-score", "IoU"]].to_dict("records")
     profile_counts = Counter(sample["profile"] for sample in val_raw_samples)

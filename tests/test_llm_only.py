@@ -3,7 +3,9 @@ import unittest
 from src.llm_only import (
     build_llm_only_prompt,
     build_llm_only_target,
+    consensus_candidate_score,
     parse_llm_only_output,
+    resolve_decode_spec,
 )
 
 
@@ -47,6 +49,25 @@ class LLMOnlyTests(unittest.TestCase):
     def test_build_raw_target_uses_text_refs_block(self):
         target = build_llm_only_target("answer", ["P1", "P2"], mode="raw")
         self.assertEqual(target, "answer\nrefs: P1,P2")
+
+    def test_decode_spec_supports_shorthand_and_explicit_values(self):
+        temp_spec = resolve_decode_spec("temp0.2")
+        self.assertEqual(temp_spec.temperature, 0.2)
+        self.assertTrue(temp_spec.do_sample)
+        explicit = resolve_decode_spec("sample:t=0.4:tokens=512:rp=1.0")
+        self.assertEqual(explicit.temperature, 0.4)
+        self.assertEqual(explicit.max_new_tokens, 512)
+        self.assertEqual(explicit.repetition_penalty, 1.0)
+
+    def test_consensus_candidate_prefers_ref_and_answer_agreement(self):
+        candidates = [
+            {"variant": "base", "abstractive": "alpha beta", "refs": ["P1"], "parse_error": False},
+            {"variant": "sample", "abstractive": "alpha beta gamma", "refs": ["P1"], "parse_error": False},
+            {"variant": "odd", "abstractive": "unrelated", "refs": ["P9"], "parse_error": False},
+        ]
+        scores = [consensus_candidate_score(candidate, candidates) for candidate in candidates]
+        self.assertGreater(scores[0], scores[2])
+        self.assertGreater(scores[1], scores[2])
 
 
 if __name__ == "__main__":

@@ -37,6 +37,11 @@ export CAMNET_LLM_ONLY_MAX_SEQ_LEN="${CAMNET_LLM_ONLY_MAX_SEQ_LEN:-32768}"
 export CAMNET_LLM_ONLY_MAX_NEW_TOKENS="${CAMNET_LLM_ONLY_MAX_NEW_TOKENS:-384}"
 export CAMNET_LLM_ONLY_BATCH_SIZE="${CAMNET_LLM_ONLY_BATCH_SIZE:-1}"
 export CAMNET_LLM_ONLY_MAX_DOC_CHARS="${CAMNET_LLM_ONLY_MAX_DOC_CHARS:-0}"
+export CAMNET_LLM_ONLY_REPETITION_PENALTY="${CAMNET_LLM_ONLY_REPETITION_PENALTY:-1.03}"
+export CAMNET_LLM_ONLY_TEMPERATURE="${CAMNET_LLM_ONLY_TEMPERATURE:-0.0}"
+export CAMNET_LLM_ONLY_TOP_P="${CAMNET_LLM_ONLY_TOP_P:-1.0}"
+export CAMNET_LLM_ONLY_CANDIDATE_VARIANTS="${CAMNET_LLM_ONLY_CANDIDATE_VARIANTS:-base}"
+export CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE="${CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE:-base}"
 
 echo "Job starts at: $(date)"
 echo "Running on node: $(hostname)"
@@ -44,6 +49,8 @@ echo "LLM-only evaluation"
 echo "Model path: $LLM_ONLY_MODEL_PATH"
 echo "Semantic model path: $SEMANTIC_MODEL_PATH"
 echo "Prompt mode: $CAMNET_LLM_ONLY_PROMPT_MODE"
+echo "Candidate variants: $CAMNET_LLM_ONLY_CANDIDATE_VARIANTS"
+echo "Candidate selection: $CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE"
 echo "Output dir: $OUTPUT_DIR"
 
 conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate_llm_only \
@@ -58,6 +65,11 @@ conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate_llm_only \
   --max-new-tokens "$CAMNET_LLM_ONLY_MAX_NEW_TOKENS" \
   --max-doc-chars "$CAMNET_LLM_ONLY_MAX_DOC_CHARS" \
   --batch-size "$CAMNET_LLM_ONLY_BATCH_SIZE" \
+  --repetition-penalty "$CAMNET_LLM_ONLY_REPETITION_PENALTY" \
+  --temperature "$CAMNET_LLM_ONLY_TEMPERATURE" \
+  --top-p "$CAMNET_LLM_ONLY_TOP_P" \
+  --candidate-variants "$CAMNET_LLM_ONLY_CANDIDATE_VARIANTS" \
+  --candidate-selection-mode "$CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE" \
   "$@"
 
 echo "Job finished at: $(date)"

@@ -25,11 +25,88 @@ class LLMOnlyPrediction:
     raw_response: str
 
 
+@dataclass(frozen=True)
+class LLMOnlyDecodeSpec:
+    name: str
+    max_new_tokens: int
+    repetition_penalty: float
+    temperature: float
+    top_p: float
+
+    @property
+    def do_sample(self) -> bool:
+        return self.temperature > 0.0
+
+
 def normalize_prompt_mode(mode: str | None) -> str:
     normalized = (mode or PROMPT_MINIMAL).strip().lower()
     if normalized not in PROMPT_MODES:
         raise ValueError(f"Unsupported LLM-only prompt mode: {mode}. Expected one of {sorted(PROMPT_MODES)}")
     return normalized
+
+
+def resolve_decode_spec(
+    variant: str,
+    *,
+    default_max_new_tokens: int | None = None,
+    default_repetition_penalty: float | None = None,
+    default_temperature: float | None = None,
+    default_top_p: float | None = None,
+) -> LLMOnlyDecodeSpec:
+    name = (variant or "base").strip()
+    max_new_tokens = default_max_new_tokens or config.LLM_ONLY_MAX_NEW_TOKENS
+    repetition_penalty = default_repetition_penalty or config.LLM_ONLY_REPETITION_PENALTY
+    temperature = config.LLM_ONLY_TEMPERATURE if default_temperature is None else default_temperature
+    top_p = config.LLM_ONLY_TOP_P if default_top_p is None else default_top_p
+
+    shorthand = name.lower()
+    if shorthand in {"base", "greedy"}:
+        temperature = 0.0
+    elif shorthand.startswith("temp"):
+        temperature = float(shorthand.replace("temp", "", 1))
+    elif shorthand.startswith("max"):
+        max_new_tokens = int(shorthand.replace("max", "", 1))
+    elif shorthand.startswith("rp"):
+        repetition_penalty = float(shorthand.replace("rp", "", 1))
+    elif ":" in name:
+        for part in name.split(":"):
+            if not part:
+                continue
+            if "=" not in part:
+                shorthand = part.lower()
+                if shorthand in {"base", "greedy"}:
+                    temperature = 0.0
+                continue
+            key, value = [item.strip().lower() for item in part.split("=", 1)]
+            if key in {"t", "temp", "temperature"}:
+                temperature = float(value)
+            elif key in {"p", "top_p", "topp"}:
+                top_p = float(value)
+            elif key in {"tokens", "max", "max_new_tokens"}:
+                max_new_tokens = int(value)
+            elif key in {"rp", "repetition_penalty"}:
+                repetition_penalty = float(value)
+
+    return LLMOnlyDecodeSpec(
+        name=name,
+        max_new_tokens=max_new_tokens,
+        repetition_penalty=repetition_penalty,
+        temperature=temperature,
+        top_p=top_p,
+    )
+
+
+def resolve_decode_specs(variants: Sequence[str] | None = None) -> list[LLMOnlyDecodeSpec]:
+    variants = list(variants or config.LLM_ONLY_CANDIDATE_VARIANTS or ["base"])
+    specs = [resolve_decode_spec(variant) for variant in variants]
+    deduped: list[LLMOnlyDecodeSpec] = []
+    seen = set()
+    for spec in specs:
+        if spec.name in seen:
+            continue
+        seen.add(spec.name)
+        deduped.append(spec)
+    return deduped or [resolve_decode_spec("base")]
 
 
 def paragraph_ids(paragraphs: Sequence[dict[str, Any]]) -> list[str]:
@@ -227,3 +304,52 @@ def fallback_refs_by_answer_overlap(answer: str, paragraphs: Sequence[dict[str, 
         scored.append((score, para_id))
     scored.sort(reverse=True)
     return [para_id for score, para_id in scored[:max_refs] if score > 0.0]
+
+
+def token_set(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text or "", flags=re.UNICODE))
+
+
+def lexical_f1(left: str, right: str) -> float:
+    left_tokens = token_set(left)
+    right_tokens = token_set(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    overlap = len(left_tokens & right_tokens)
+    precision = overlap / max(1, len(left_tokens))
+    recall = overlap / max(1, len(right_tokens))
+    return (2 * precision * recall) / max(1e-8, precision + recall)
+
+
+def ref_iou(left: Sequence[str], right: Sequence[str]) -> float:
+    left_set = set(left or [])
+    right_set = set(right or [])
+    if not left_set and not right_set:
+        return 1.0
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
+
+
+def consensus_candidate_score(candidate: dict[str, Any], candidates: Sequence[dict[str, Any]]) -> float:
+    if len(candidates) <= 1:
+        return 0.0
+    answer = str(candidate.get("abstractive", ""))
+    refs = candidate.get("refs") or []
+    answer_scores = []
+    ref_scores = []
+    for other in candidates:
+        if other is candidate:
+            continue
+        answer_scores.append(lexical_f1(answer, str(other.get("abstractive", ""))))
+        ref_scores.append(ref_iou(refs, other.get("refs") or []))
+    validity_bonus = 0.05 if refs else -0.20
+    parse_penalty = -0.05 if candidate.get("parse_error") else 0.0
+    length_penalty = -0.05 if len(answer) > 420 else 0.0
+    return (
+        0.55 * (sum(answer_scores) / max(1, len(answer_scores)))
+        + 0.35 * (sum(ref_scores) / max(1, len(ref_scores)))
+        + validity_bonus
+        + parse_penalty
+        + length_penalty
+    )

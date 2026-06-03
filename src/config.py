@@ -157,6 +157,17 @@ LLM_ONLY_MAX_SEQ_LEN = int(os.environ.get("CAMNET_LLM_ONLY_MAX_SEQ_LEN", "32768"
 LLM_ONLY_MAX_NEW_TOKENS = int(os.environ.get("CAMNET_LLM_ONLY_MAX_NEW_TOKENS", "384"))
 LLM_ONLY_BATCH_SIZE = int(os.environ.get("CAMNET_LLM_ONLY_BATCH_SIZE", "1"))
 LLM_ONLY_REPETITION_PENALTY = float(os.environ.get("CAMNET_LLM_ONLY_REPETITION_PENALTY", "1.03"))
+LLM_ONLY_TEMPERATURE = float(os.environ.get("CAMNET_LLM_ONLY_TEMPERATURE", "0.0"))
+LLM_ONLY_TOP_P = float(os.environ.get("CAMNET_LLM_ONLY_TOP_P", "1.0"))
+LLM_ONLY_CANDIDATE_VARIANTS = [
+    item.strip()
+    for item in os.environ.get("CAMNET_LLM_ONLY_CANDIDATE_VARIANTS", "base").split(",")
+    if item.strip()
+]
+LLM_ONLY_CANDIDATE_SELECTION_MODE = os.environ.get(
+    "CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE",
+    "base",
+).strip().lower()
 LLM_ONLY_USE_CHAT_TEMPLATE = os.environ.get("CAMNET_LLM_ONLY_USE_CHAT_TEMPLATE", "1").strip() not in {
     "0",
     "false",
