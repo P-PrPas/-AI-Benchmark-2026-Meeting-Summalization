@@ -42,6 +42,7 @@ export CAMNET_LLM_ONLY_TEMPERATURE="${CAMNET_LLM_ONLY_TEMPERATURE:-0.0}"
 export CAMNET_LLM_ONLY_TOP_P="${CAMNET_LLM_ONLY_TOP_P:-1.0}"
 export CAMNET_LLM_ONLY_CANDIDATE_VARIANTS="${CAMNET_LLM_ONLY_CANDIDATE_VARIANTS:-base}"
 export CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE="${CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE:-base}"
+export CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH="${CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH:-}"
 
 echo "Job starts at: $(date)"
 echo "Running on node: $(hostname)"
@@ -51,7 +52,13 @@ echo "Semantic model path: $SEMANTIC_MODEL_PATH"
 echo "Prompt mode: $CAMNET_LLM_ONLY_PROMPT_MODE"
 echo "Candidate variants: $CAMNET_LLM_ONLY_CANDIDATE_VARIANTS"
 echo "Candidate selection: $CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE"
+echo "Candidate ranker: $CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH"
 echo "Output dir: $OUTPUT_DIR"
+
+EXTRA_ARGS=()
+if [ -n "$CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH" ]; then
+  EXTRA_ARGS+=(--candidate-ranker-path "$CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH")
+fi
 
 conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate_llm_only \
   --project-root "$REPO_ROOT" \
@@ -70,6 +77,7 @@ conda run -n "$CONDA_ENV_NAME" python -u -m finetune.evaluate_llm_only \
   --top-p "$CAMNET_LLM_ONLY_TOP_P" \
   --candidate-variants "$CAMNET_LLM_ONLY_CANDIDATE_VARIANTS" \
   --candidate-selection-mode "$CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE" \
+  "${EXTRA_ARGS[@]}" \
   "$@"
 
 echo "Job finished at: $(date)"

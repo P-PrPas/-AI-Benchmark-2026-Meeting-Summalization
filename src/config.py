@@ -168,6 +168,7 @@ LLM_ONLY_CANDIDATE_SELECTION_MODE = os.environ.get(
     "CAMNET_LLM_ONLY_CANDIDATE_SELECTION_MODE",
     "base",
 ).strip().lower()
+LLM_ONLY_CANDIDATE_RANKER_PATH = os.environ.get("CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH")
 LLM_ONLY_USE_CHAT_TEMPLATE = os.environ.get("CAMNET_LLM_ONLY_USE_CHAT_TEMPLATE", "1").strip() not in {
     "0",
     "false",

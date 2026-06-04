@@ -19,6 +19,7 @@ from src.llm_only import (
     resolve_decode_specs,
     truncate_paragraphs_by_chars,
 )
+from src.llm_only_ranker import load_llm_only_candidate_ranker_if_available
 
 from .common import (
     DEFAULT_EMBED_MODEL_PATH,
@@ -77,9 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--candidate-selection-mode",
-        choices=["base", "consensus", "oracle"],
+        choices=["base", "consensus", "oracle", "ranker"],
         default=runtime_config.LLM_ONLY_CANDIDATE_SELECTION_MODE,
     )
+    parser.add_argument("--candidate-ranker-path", default=runtime_config.LLM_ONLY_CANDIDATE_RANKER_PATH)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-doc-ratio", type=float, default=0.2)
     parser.add_argument("--load-in-4bit", action="store_true")
@@ -137,6 +139,7 @@ def print_runtime_config(args: argparse.Namespace) -> None:
     print(f"  top_p={args.top_p}")
     print(f"  candidate_variants={args.candidate_variants}")
     print(f"  candidate_selection_mode={args.candidate_selection_mode}")
+    print(f"  candidate_ranker_path={args.candidate_ranker_path}")
     print(f"  load_in_4bit={args.load_in_4bit}")
     print(f"  use_chat_template={args.use_chat_template}")
     print(f"  enable_ref_fallback={args.enable_ref_fallback}")
@@ -387,6 +390,12 @@ def main() -> None:
         from rouge_score import rouge_scorer
 
         rouge_scorer_obj = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False, tokenizer=ThaiSpaceTokenizer())
+    candidate_ranker = None
+    if args.candidate_selection_mode == "ranker":
+        candidate_ranker = load_llm_only_candidate_ranker_if_available(args.candidate_ranker_path)
+        if candidate_ranker is None:
+            raise ValueError("--candidate-ranker-path or CAMNET_LLM_ONLY_CANDIDATE_RANKER_PATH is required for ranker mode")
+        candidate_ranker.load_model()
 
     prediction_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
@@ -431,14 +440,19 @@ def main() -> None:
             for candidate, embedding in zip(candidates, embeddings[1:]):
                 semantic_scores[candidate["variant"]] = float((gold_embedding * embedding).sum())
 
-        chosen = select_candidate(
-            candidates,
-            mode=args.candidate_selection_mode,
-            gold_answer=sample["answer"],
-            gold_refs=sample["gold_refs"],
-            semantic_scores=semantic_scores,
-            rouge_scorer_obj=rouge_scorer_obj,
-        )
+        if candidate_ranker is not None:
+            ranker_prediction = candidate_ranker.select(sample["query"], candidates)
+            chosen = dict(ranker_prediction.candidate)
+            chosen["ranker_score"] = ranker_prediction.score
+        else:
+            chosen = select_candidate(
+                candidates,
+                mode=args.candidate_selection_mode,
+                gold_answer=sample["answer"],
+                gold_refs=sample["gold_refs"],
+                semantic_scores=semantic_scores,
+                rouge_scorer_obj=rouge_scorer_obj,
+            )
         refs = chosen.get("refs") or []
         parse_errors += int(chosen.get("parse_error", False))
         invalid_ref_rows += int(bool(chosen.get("invalid_refs") or []))
@@ -459,6 +473,7 @@ def main() -> None:
                 "gold_answer": sample["answer"],
                 "gold_refs": sample["gold_refs"],
                 "chosen_variant": chosen.get("variant", "unknown"),
+                "ranker_score": chosen.get("ranker_score"),
                 "candidates": candidates,
             }
         )
@@ -475,6 +490,7 @@ def main() -> None:
                 "parse_error": chosen.get("parse_error", False),
                 "invalid_refs": chosen.get("invalid_refs", []),
                 "chosen_variant": chosen.get("variant", "unknown"),
+                "ranker_score": chosen.get("ranker_score"),
                 "prompt_chars": sample["prompt_chars"],
                 "available_ref_count": len(sample["valid_refs"]),
             }

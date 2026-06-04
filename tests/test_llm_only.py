@@ -7,6 +7,7 @@ from src.llm_only import (
     parse_llm_only_output,
     resolve_decode_spec,
 )
+from src.llm_only_ranker import extract_llm_only_candidate_features
 
 
 class LLMOnlyTests(unittest.TestCase):
@@ -68,6 +69,18 @@ class LLMOnlyTests(unittest.TestCase):
         scores = [consensus_candidate_score(candidate, candidates) for candidate in candidates]
         self.assertGreater(scores[0], scores[2])
         self.assertGreater(scores[1], scores[2])
+
+    def test_llm_only_ranker_features_include_refs_and_variant_flags(self):
+        candidates = [
+            {"variant": "base", "abstractive": "alpha beta", "refs": ["P1"], "parse_error": False},
+            {"variant": "temp0.2", "abstractive": "alpha beta gamma", "refs": ["P1", "P2"], "parse_error": True},
+        ]
+        features = extract_llm_only_candidate_features("alpha?", candidates[1], candidates, candidate_index=1)
+        self.assertEqual(features["candidate_index"], 1.0)
+        self.assertEqual(features["ref_count"], 2.0)
+        self.assertEqual(features["parse_error"], 1.0)
+        self.assertEqual(features["is_sampled"], 1.0)
+        self.assertGreater(features["answer_consensus"], 0.0)
 
 
 if __name__ == "__main__":
